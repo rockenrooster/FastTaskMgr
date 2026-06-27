@@ -20,7 +20,7 @@ internal sealed class SettingsPage : PageBase
     private readonly Label _updateStatus = new();
     private readonly LoadingSpinner _updateSpinner = new();
     private readonly Button _checkUpdates = new() { Text = "Check for updates", AutoSize = true, Height = 32 };
-    private readonly Button _downloadUpdate = new() { Text = "Download update", AutoSize = true, Height = 32, Enabled = false };
+    private readonly Button _downloadUpdate = new() { Text = "Download and Install Update", AutoSize = true, Height = 32, Enabled = false };
 
     public SettingsPage(AppState state)
         : base(state)
@@ -191,8 +191,9 @@ internal sealed class SettingsPage : PageBase
     {
         try
         {
-            string path = await State.Updates.DownloadLatestAsync();
-            MessageBox.Show(this, $"Downloaded update to:\n{path}", "FastTaskMgr", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            await State.Updates.DownloadLatestAsync();
+            State.Updates.InstallDownloadedUpdate(Application.ExecutablePath);
+            Application.Exit();
         }
         catch (Exception ex)
         {

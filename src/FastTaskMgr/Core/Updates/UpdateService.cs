@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -110,7 +112,7 @@ internal sealed class UpdateService : IDisposable
             extension = ".exe";
         }
 
-        string targetPath = Path.Combine(updateDir, $"FastTaskMgr-{version}{extension}");
+        string targetPath = Path.Combine(updateDir, $"FastTaskMgr-{version}-{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid():N}{extension}");
         string tempPath = targetPath + ".download";
 
         try
@@ -150,6 +152,32 @@ internal sealed class UpdateService : IDisposable
             SetDownloading(false, 0, null);
             throw;
         }
+    }
+
+    public void InstallDownloadedUpdate(string appPath)
+    {
+        string sourcePath = DownloadedFile ?? throw new InvalidOperationException("Download the update before installing.");
+        if (!File.Exists(sourcePath))
+        {
+            throw new FileNotFoundException("Downloaded update file was not found.", sourcePath);
+        }
+
+        string script = $"""
+        $ErrorActionPreference = 'Stop'
+        Wait-Process -Id {Environment.ProcessId} -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath '{EscapePowerShell(sourcePath)}' -Destination '{EscapePowerShell(appPath)}' -Force
+        Start-Process -FilePath '{EscapePowerShell(appPath)}'
+        """;
+        string encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        ProcessStartInfo startInfo = new()
+        {
+            FileName = "powershell.exe",
+            Arguments = $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand {encoded}",
+            CreateNoWindow = true,
+            UseShellExecute = false,
+            WindowStyle = ProcessWindowStyle.Hidden
+        };
+        Process.Start(startInfo);
     }
 
     public void Dispose() => _http.Dispose();
@@ -299,6 +327,8 @@ internal sealed class UpdateService : IDisposable
         string cleaned = new(value.Select(character => invalid.Contains(character) ? '-' : character).ToArray());
         return string.IsNullOrWhiteSpace(cleaned) ? "update" : cleaned;
     }
+
+    private static string EscapePowerShell(string value) => value.Replace("'", "''", StringComparison.Ordinal);
 
     private static void TryDelete(string path)
     {
