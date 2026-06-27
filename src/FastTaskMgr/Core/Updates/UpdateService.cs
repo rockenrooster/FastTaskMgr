@@ -162,19 +162,55 @@ internal sealed class UpdateService : IDisposable
             throw new FileNotFoundException("Downloaded update file was not found.", sourcePath);
         }
 
-        string script = $"""
-        $ErrorActionPreference = 'Stop'
-        Wait-Process -Id {Environment.ProcessId} -ErrorAction SilentlyContinue
-        Copy-Item -LiteralPath '{EscapePowerShell(sourcePath)}' -Destination '{EscapePowerShell(appPath)}' -Force
-        Start-Process -FilePath '{EscapePowerShell(appPath)}'
+        string updateDir = Path.GetDirectoryName(sourcePath) ?? Path.GetTempPath();
+        string scriptPath = Path.Combine(updateDir, $"install-{Guid.NewGuid():N}.ps1");
+        string logPath = Path.Combine(updateDir, "install.log");
+        string script = $$"""
+        $ErrorActionPreference = 'Continue'
+        $source = '{{EscapePowerShell(sourcePath)}}'
+        $target = '{{EscapePowerShell(appPath)}}'
+        $log = '{{EscapePowerShell(logPath)}}'
+        $currentPid = {{Environment.ProcessId}}
+
+        function Log($message) {
+            Add-Content -LiteralPath $log -Value "$(Get-Date -Format o) $message" -ErrorAction SilentlyContinue
+        }
+
+        Wait-Process -Id $currentPid -Timeout 30 -ErrorAction SilentlyContinue
+        Get-Process -Name FastTaskMgr -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                if ($_.Path -eq $target) {
+                    Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+                }
+            }
+            catch {
+            }
+        }
+
+        $lastError = ''
+        for ($attempt = 0; $attempt -lt 80; $attempt++) {
+            try {
+                Copy-Item -LiteralPath $source -Destination $target -Force -ErrorAction Stop
+                Start-Process -FilePath $target
+                Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+                exit 0
+            }
+            catch {
+                $lastError = $_.Exception.Message
+                Start-Sleep -Milliseconds 500
+            }
+        }
+
+        Log "Install failed: $lastError"
+        Start-Process -FilePath $target -ErrorAction SilentlyContinue
+        exit 1
         """;
-        string encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        File.WriteAllText(scriptPath, script, Encoding.UTF8);
         ProcessStartInfo startInfo = new()
         {
             FileName = "powershell.exe",
-            Arguments = $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand {encoded}",
-            CreateNoWindow = true,
-            UseShellExecute = false,
+            Arguments = $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File {QuoteArgument(scriptPath)}",
+            UseShellExecute = true,
             WindowStyle = ProcessWindowStyle.Hidden
         };
         Process.Start(startInfo);
@@ -329,6 +365,8 @@ internal sealed class UpdateService : IDisposable
     }
 
     private static string EscapePowerShell(string value) => value.Replace("'", "''", StringComparison.Ordinal);
+
+    private static string QuoteArgument(string value) => "\"" + value.Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
 
     private static void TryDelete(string path)
     {
