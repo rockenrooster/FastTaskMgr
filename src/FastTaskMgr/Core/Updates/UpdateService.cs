@@ -121,24 +121,26 @@ internal sealed class UpdateService : IDisposable
             response.EnsureSuccessStatusCode();
 
             long? total = response.Content.Headers.ContentLength;
-            await using Stream input = await response.Content.ReadAsStreamAsync(cancellationToken);
-            await using FileStream output = File.Create(tempPath);
-
-            byte[] buffer = new byte[81920];
-            long received = 0;
-            while (true)
             {
-                int read = await input.ReadAsync(buffer, cancellationToken);
-                if (read == 0)
-                {
-                    break;
-                }
+                await using Stream input = await response.Content.ReadAsStreamAsync(cancellationToken);
+                await using FileStream output = File.Create(tempPath);
 
-                await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
-                received += read;
-                if (total is > 0)
+                byte[] buffer = new byte[81920];
+                long received = 0;
+                while (true)
                 {
-                    SetDownloadProgress(received / (double)total.Value * 100);
+                    int read = await input.ReadAsync(buffer, cancellationToken);
+                    if (read == 0)
+                    {
+                        break;
+                    }
+
+                    await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                    received += read;
+                    if (total is > 0)
+                    {
+                        SetDownloadProgress(received / (double)total.Value * 100);
+                    }
                 }
             }
 
