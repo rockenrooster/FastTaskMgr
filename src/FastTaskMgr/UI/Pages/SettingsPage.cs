@@ -314,7 +314,7 @@ internal sealed class SettingsPage : PageBase
         try
         {
             await State.Updates.DownloadLatestAsync();
-            State.Updates.InstallDownloadedUpdate(Application.ExecutablePath);
+            State.Updates.InstallDownloadedUpdate();
             Application.Exit();
         }
         catch (Exception ex)

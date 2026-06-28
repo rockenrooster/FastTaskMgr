@@ -12,8 +12,22 @@ function RunDotnet {
     }
 }
 
+function Get-InnoCompiler {
+    $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    $candidate = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+    if (Test-Path $candidate) {
+        return $candidate
+    }
+
+    throw "Inno Setup 6 is required to build FastTaskMgr-Setup.exe."
+}
+
 $csprojPath = Join-Path $PSScriptRoot "src\FastTaskMgr\FastTaskMgr.csproj"
-$setupCsprojPath = Join-Path $PSScriptRoot "src\FastTaskMgr.Setup\FastTaskMgr.Setup.csproj"
+$innoScript = Join-Path $PSScriptRoot "installer\FastTaskMgr.iss"
 $content = Get-Content $csprojPath -Raw
 
 if ($Version) {
@@ -39,23 +53,15 @@ $content = $content -replace '<FileVersion>.*?</FileVersion>', "<FileVersion>$ne
 Set-Content $csprojPath -Value $content -NoNewline
 
 $publishDir = Join-Path $PSScriptRoot "src\FastTaskMgr\obj\script-publish"
-$setupPayloadDir = Join-Path $PSScriptRoot "src\FastTaskMgr.Setup\Payload"
-$setupPublishDir = Join-Path $PSScriptRoot "src\FastTaskMgr.Setup\obj\script-publish"
+$artifactDir = Join-Path $PSScriptRoot "artifacts"
 Remove-Item $publishDir -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item $setupPublishDir -Recurse -Force -ErrorAction SilentlyContinue
 
 RunDotnet clean $csprojPath -c Release
 RunDotnet publish $csprojPath -c Release -r win-x64 --self-contained false -o $publishDir /p:PublishSingleFile=true /p:PublishReadyToRun=true
 
 $publishExe = Join-Path $publishDir "FastTaskMgr.exe"
-New-Item -ItemType Directory -Path $setupPayloadDir -Force | Out-Null
-Copy-Item $publishExe (Join-Path $setupPayloadDir "FastTaskMgr.exe") -Force
-RunDotnet publish $setupCsprojPath -c Release -r win-x64 --self-contained false -o $setupPublishDir /p:PublishSingleFile=true /p:PublishReadyToRun=true /p:AssemblyVersion=$newVersion /p:FileVersion=$newVersion
-
-$artifactDir = Join-Path $PSScriptRoot "artifacts"
 $artifactExe = Join-Path $artifactDir "FastTaskMgr.exe"
 $artifactSha = Join-Path $artifactDir "FastTaskMgr.exe.sha256"
-$setupExe = Join-Path $setupPublishDir "FastTaskMgr.Setup.exe"
 $setupArtifact = Join-Path $artifactDir "FastTaskMgr-Setup.exe"
 $setupSha = Join-Path $artifactDir "FastTaskMgr-Setup.exe.sha256"
 
@@ -72,7 +78,12 @@ catch {
 $hash = (Get-FileHash $artifactExe -Algorithm SHA256).Hash.ToLowerInvariant()
 "$hash  FastTaskMgr.exe" | Set-Content $artifactSha
 
-Copy-Item $setupExe $setupArtifact -Force
+$iscc = Get-InnoCompiler
+& $iscc "/DAppVersion=$newVersion" "/DSourceDir=$publishDir" "/DOutputDir=$artifactDir" $innoScript
+if ($LASTEXITCODE -ne 0) {
+    throw "ISCC failed"
+}
+
 $setupHash = (Get-FileHash $setupArtifact -Algorithm SHA256).Hash.ToLowerInvariant()
 "$setupHash  FastTaskMgr-Setup.exe" | Set-Content $setupSha
 

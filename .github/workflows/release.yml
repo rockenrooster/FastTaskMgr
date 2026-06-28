@@ -27,6 +27,10 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
       - name: Resolve version
         shell: pwsh
         run: |

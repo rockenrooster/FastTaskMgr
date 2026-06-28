@@ -29,6 +29,14 @@ function Get-CurrentVersion {
     Get-VersionFromContent (Get-Content $csprojPath -Raw) $csprojPath
 }
 
+function Set-ProjectVersion {
+    $csprojPath = Join-Path $PSScriptRoot "src\FastTaskMgr\FastTaskMgr.csproj"
+    $content = Get-Content $csprojPath -Raw
+    $content = $content -replace '<AssemblyVersion>.*?</AssemblyVersion>', "<AssemblyVersion>$Version</AssemblyVersion>"
+    $content = $content -replace '<FileVersion>.*?</FileVersion>', "<FileVersion>$Version</FileVersion>"
+    Set-Content $csprojPath -Value $content -NoNewline
+}
+
 function Get-DefaultReleaseVersion {
     $current = Get-CurrentVersion
     $headContent = git show HEAD:src/FastTaskMgr/FastTaskMgr.csproj 2>$null
@@ -98,30 +106,7 @@ if (![string]::IsNullOrWhiteSpace($remoteTag)) {
     throw "Remote tag $tag already exists."
 }
 
-& (Join-Path $PSScriptRoot "build.ps1") -Version $Version -NoIncrement
-
-$artifactExe = Join-Path $PSScriptRoot "artifacts\FastTaskMgr.exe"
-$artifactSha = Join-Path $PSScriptRoot "artifacts\FastTaskMgr.exe.sha256"
-if (!(Test-Path $artifactExe) -or !(Test-Path $artifactSha)) {
-    throw "Build did not create the release artifacts."
-}
-
-$fileVersion = (Get-Item $artifactExe).VersionInfo.FileVersion
-if ([version]$fileVersion -ne [version]$Version) {
-    throw "FileVersion $fileVersion does not match $Version."
-}
-Write-Host "Verified local artifact FileVersion $fileVersion for $tag" -ForegroundColor Cyan
-
-$setupExe = Join-Path $PSScriptRoot "artifacts\FastTaskMgr-Setup.exe"
-$setupSha = Join-Path $PSScriptRoot "artifacts\FastTaskMgr-Setup.exe.sha256"
-if (!(Test-Path $setupExe) -or !(Test-Path $setupSha)) {
-    throw "Build did not create the setup artifacts."
-}
-
-$setupVersion = (Get-Item $setupExe).VersionInfo.FileVersion
-if ([version]$setupVersion -ne [version]$Version) {
-    throw "Setup FileVersion $setupVersion does not match $Version."
-}
+Set-ProjectVersion
 
 RunGit add -A
 

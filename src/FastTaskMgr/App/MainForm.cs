@@ -11,10 +11,10 @@ internal sealed class MainForm : Form
     private readonly Label _title = new();
     private readonly TextBox _search = new();
     private readonly Dictionary<string, Button> _navButtons = [];
-    private readonly Dictionary<string, Func<IAppPage>> _pageFactories = [];
-    private readonly Dictionary<string, IAppPage> _pages = [];
+    private readonly Dictionary<string, PageBase> _pages = [];
     private readonly Font _navSelectedFont;
-    private IAppPage? _currentPage;
+    private PageBase? _currentPage;
+    private bool _updateCheckStarted;
 
     public MainForm(AppState state)
     {
@@ -40,9 +40,14 @@ internal sealed class MainForm : Form
         BuildLayout();
         RegisterPages();
         _state.SettingsChanged += (_, _) => ApplySettings();
-        _state.Updates.StatusChanged += (_, _) => RunOnUiThread(UpdateSettingsMarker);
         ShowPage(_state.Settings.DefaultPage);
         ApplySettings();
+    }
+
+    protected override async void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        await StartLazyUpdateCheckAsync();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -152,37 +157,38 @@ internal sealed class MainForm : Form
 
     private void RegisterPages()
     {
-        AddPage("Processes", () => new ProcessesPage(_state));
-        AddPage("Performance", () => new PerformancePage(_state));
-        AddPage("Startup apps", () => new StartupPage(_state));
-        AddPage("Users", () => new StubPage(_state, "Users", "TODO: WTS session/process rollup."));
-        AddPage("Details", () => new DetailsPage(_state));
-        AddPage("Services", () => new ServicesPage(_state));
-        AddPage("Settings", () => new SettingsPage(_state));
+        AddPage("Processes", new ProcessesPage(_state));
+        AddPage("Performance", new PerformancePage(_state));
+        AddPage("Startup apps", new StartupPage(_state));
+        AddPage("Users", new StubPage(_state, "Users", "TODO: WTS session/process rollup."));
+        AddPage("Details", new DetailsPage(_state));
+        AddPage("Services", new ServicesPage(_state));
+        AddPage("Settings", new SettingsPage(_state));
     }
 
-    private void AddPage(string key, Func<IAppPage> factory)
+    private void AddPage(string key, PageBase page)
     {
-        _pageFactories[key] = factory;
+        page.Visible = false;
+        _pages[key] = page;
+        _pageHost.Controls.Add(page);
     }
 
     private void ShowPage(string key)
     {
-        if (!_pageFactories.ContainsKey(key))
+        if (!_pages.TryGetValue(key, out PageBase? page))
         {
             key = "Processes";
+            page = _pages[key];
         }
 
-        IAppPage page = GetPage(key);
         _currentPage?.OnHide();
-        foreach (Control control in _pageHost.Controls)
+        if (_currentPage is not null)
         {
-            control.Visible = false;
+            _currentPage.Visible = false;
         }
 
-        Control pageControl = (Control)page;
-        pageControl.Visible = true;
-        pageControl.BringToFront();
+        page.Visible = true;
+        page.BringToFront();
         _currentPage = page;
         _title.Text = page.Title;
         SetSearchVisible(page.UsesSearch);
@@ -193,22 +199,6 @@ internal sealed class MainForm : Form
         {
             button.Font = navKey == key ? _navSelectedFont : Font;
         }
-    }
-
-    private IAppPage GetPage(string key)
-    {
-        if (_pages.TryGetValue(key, out IAppPage? page))
-        {
-            return page;
-        }
-
-        page = _pageFactories[key]();
-        Control pageControl = (Control)page;
-        pageControl.Visible = false;
-        _pageHost.Controls.Add(pageControl);
-        AppTheme.Apply(pageControl, _state.Settings.Theme);
-        _pages[key] = page;
-        return page;
     }
 
     private void ApplySettings()
@@ -237,7 +227,7 @@ internal sealed class MainForm : Form
 
     private void PaintSettingsUpdateMarker(object? sender, PaintEventArgs e)
     {
-        if (_state.Updates.LastResult?.IsUpdateAvailable != true || sender is not Button button)
+        if (!_state.IsUpdateAvailable || sender is not Button button)
         {
             return;
         }
@@ -262,6 +252,27 @@ internal sealed class MainForm : Form
         }
 
         action();
+    }
+
+    private async Task StartLazyUpdateCheckAsync()
+    {
+        if (_updateCheckStarted)
+        {
+            return;
+        }
+
+        _updateCheckStarted = true;
+        await Task.Delay(1500);
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        _state.Updates.StatusChanged += (_, _) => RunOnUiThread(UpdateSettingsMarker);
+        if (_state.Updates.LastResult is null && !_state.Updates.IsChecking)
+        {
+            await _state.Updates.CheckAsync();
+        }
     }
 
     protected override void Dispose(bool disposing)

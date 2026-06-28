@@ -1,15 +1,6 @@
 namespace FastTaskMgr.App;
 
-internal interface IAppPage
-{
-    string Title { get; }
-    bool UsesSearch { get; }
-    void OnShow();
-    void OnHide();
-    void ApplySearch(string searchText);
-}
-
-internal abstract class PageBase : UserControl, IAppPage
+internal abstract class PageBase : UserControl
 {
     protected PageBase(AppState state)
     {

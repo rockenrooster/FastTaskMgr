@@ -25,6 +25,7 @@ internal sealed class AppState : IDisposable
     public ServiceRepository Services => _services.Value;
     public StartupRepository Startup => _startup.Value;
     public UpdateService Updates => _updates.Value;
+    public bool IsUpdateAvailable => _updates.IsValueCreated && _updates.Value.LastResult?.IsUpdateAvailable == true;
 
     public event EventHandler? SettingsChanged;
 

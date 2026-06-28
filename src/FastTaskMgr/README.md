@@ -34,6 +34,8 @@ The executable is emitted under:
 src/FastTaskMgr/bin/Release/net10.0-windows/win-x64/publish/FastTaskMgr.exe
 ```
 
+`.\build.ps1` also creates `artifacts\FastTaskMgr-Setup.exe` using Inno Setup 6. GitHub Actions installs Inno for release builds; local setup packaging needs Inno installed.
+
 ## Native AOT
 
 Native AOT is intentionally not required for the main build. WinForms, reflection-adjacent framework code, and native interop need separate verification before AOT can be trusted. An experimental profile is included at `Properties/PublishProfiles/NativeAot.Experimental.pubxml` for future testing only.
