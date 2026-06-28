@@ -1,11 +1,13 @@
 using FastTaskMgr.App;
 using FastTaskMgr.UI.Controls;
+using Microsoft.Win32;
 using System.Security.Principal;
 
 namespace FastTaskMgr.UI.Pages;
 
 internal sealed class SettingsPage : PageBase
 {
+    private const string TaskManagerIfeoKey = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe";
     private readonly ComboBox _defaultPage = new();
     private readonly ComboBox _updateSpeed = new();
     private readonly ComboBox _theme = new();
@@ -13,6 +15,7 @@ internal sealed class SettingsPage : PageBase
     private readonly CheckBox _minimizeOnUse = new() { Text = "Minimize on use", AutoSize = true };
     private readonly CheckBox _hideWhenMinimized = new() { Text = "Hide when minimized", AutoSize = true };
     private readonly CheckBox _alwaysStartAsAdmin = new() { Text = "Always start as admin", AutoSize = true };
+    private readonly CheckBox _replaceTaskManager = new() { Text = "Use FastTaskMgr for Task Manager shortcuts", AutoSize = true };
     private readonly CheckBox _confirmEnd = new() { Text = "Confirm before ending process", AutoSize = true };
     private readonly CheckBox _confirmEfficiency = new() { Text = "Confirm before efficiency mode", AutoSize = true };
     private readonly Label _currentVersion = new();
@@ -21,40 +24,61 @@ internal sealed class SettingsPage : PageBase
     private readonly LoadingSpinner _updateSpinner = new();
     private readonly Button _checkUpdates = new() { Text = "Check for updates", AutoSize = true, Height = 32 };
     private readonly Button _downloadUpdate = new() { Text = "Download and Install Update", AutoSize = true, Height = 32, Enabled = false };
+    private readonly Button _save = new() { Text = "Save", AutoSize = true, Height = 32 };
+    private readonly Label _saveStatus = new() { AutoSize = true, Margin = new Padding(10, 8, 0, 0) };
+    private readonly System.Windows.Forms.Timer _saveStatusTimer = new() { Interval = 2400 };
 
     public SettingsPage(AppState state)
         : base(state)
     {
-        TableLayoutPanel form = new()
+        AutoScroll = true;
+        FlowLayoutPanel root = new()
         {
-            Dock = DockStyle.Top,
-            AutoSize = true,
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+            FlowDirection = FlowDirection.TopDown,
             Padding = new Padding(14),
-            ColumnCount = 2
+            WrapContents = false
         };
-        form.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
-        form.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 500));
-        Controls.Add(form);
+        root.Resize += (_, _) => ResizeSections(root);
+        Controls.Add(root);
 
         ConfigureCombo(_defaultPage, ["Processes", "Performance", "Startup apps", "Users", "Details", "Services", "Settings"]);
         ConfigureCombo(_updateSpeed, Enum.GetNames<UpdateSpeed>());
         ConfigureCombo(_theme, ["System", "Light", "Dark"]);
 
-        AddRow(form, "Default start page", _defaultPage);
-        AddRow(form, "Real-time update speed", _updateSpeed);
-        AddRow(form, "Theme", _theme);
-        AddRow(form, "", _alwaysOnTop);
-        AddRow(form, "", _minimizeOnUse);
-        AddRow(form, "", _hideWhenMinimized);
-        AddRow(form, "", _alwaysStartAsAdmin);
-        AddRow(form, "", _confirmEnd);
-        AddRow(form, "", _confirmEfficiency);
-        AddRow(form, "Updates", BuildUpdatePanel(), 150);
+        TableLayoutPanel general = AddSection(root, "General", 146);
+        AddRow(general, "Default start page", _defaultPage);
+        AddRow(general, "Real-time update speed", _updateSpeed);
+        AddRow(general, "Theme", _theme);
 
-        Button save = new() { Text = "Save", AutoSize = true, Height = 32 };
-        save.Click += (_, _) => Save();
-        AddRow(form, "", save);
+        TableLayoutPanel behavior = AddSection(root, "Behavior", 186);
+        AddRow(behavior, "", _alwaysOnTop);
+        AddRow(behavior, "", _minimizeOnUse);
+        AddRow(behavior, "", _hideWhenMinimized);
+        AddRow(behavior, "", _confirmEnd);
+        AddRow(behavior, "", _confirmEfficiency);
 
+        TableLayoutPanel integration = AddSection(root, "Windows Integration", 106);
+        AddRow(integration, "", _alwaysStartAsAdmin);
+        AddRow(integration, "", _replaceTaskManager);
+
+        TableLayoutPanel updates = AddSection(root, "Updates", 174);
+        AddRow(updates, "", BuildUpdatePanel(), 142);
+
+        TableLayoutPanel actions = AddSection(root, "Save", 72);
+        FlowLayoutPanel saveRow = new()
+        {
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false
+        };
+        saveRow.Controls.Add(_save);
+        saveRow.Controls.Add(_saveStatus);
+        AddRow(actions, "", saveRow);
+
+        _save.Click += (_, _) => Save();
+        _saveStatusTimer.Tick += (_, _) => ClearSaveStatus();
         _checkUpdates.Click += async (_, _) => await CheckForUpdatesAsync();
         _downloadUpdate.Click += async (_, _) => await DownloadUpdateAsync();
         State.Updates.StatusChanged += (_, _) => RefreshUpdateUi();
@@ -71,8 +95,10 @@ internal sealed class SettingsPage : PageBase
         _minimizeOnUse.Checked = State.Settings.MinimizeOnUse;
         _hideWhenMinimized.Checked = State.Settings.HideWhenMinimized;
         _alwaysStartAsAdmin.Checked = State.Settings.AlwaysStartAsAdmin;
+        _replaceTaskManager.Checked = IsTaskManagerReplacementEnabled();
         _confirmEnd.Checked = State.Settings.ConfirmBeforeEndProcess;
         _confirmEfficiency.Checked = State.Settings.ConfirmBeforeEfficiencyMode;
+        ClearSaveStatus();
         RefreshUpdateUi();
         if (State.Updates.LastResult is null && !State.Updates.IsChecking)
         {
@@ -85,6 +111,39 @@ internal sealed class SettingsPage : PageBase
         combo.DropDownStyle = ComboBoxStyle.DropDownList;
         combo.Width = 220;
         combo.Items.AddRange(values);
+    }
+
+    private static TableLayoutPanel AddSection(FlowLayoutPanel root, string title, int height)
+    {
+        GroupBox group = new()
+        {
+            Text = title,
+            Width = 720,
+            Height = height,
+            Margin = new Padding(0, 0, 0, 12),
+            Padding = new Padding(10)
+        };
+
+        TableLayoutPanel panel = new()
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            Padding = new Padding(8, 12, 8, 8)
+        };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        group.Controls.Add(panel);
+        root.Controls.Add(group);
+        return panel;
+    }
+
+    private static void ResizeSections(FlowLayoutPanel root)
+    {
+        int width = Math.Max(520, root.ClientSize.Width - root.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 6);
+        foreach (Control control in root.Controls)
+        {
+            control.Width = width;
+        }
     }
 
     private Control BuildUpdatePanel()
@@ -175,10 +234,49 @@ internal sealed class SettingsPage : PageBase
         State.Settings.ConfirmBeforeEndProcess = _confirmEnd.Checked;
         State.Settings.ConfirmBeforeEfficiencyMode = _confirmEfficiency.Checked;
         State.SaveSettings();
+        bool integrationSaved = ApplyTaskManagerReplacement();
+        ShowSaveStatus(integrationSaved ? "Saved" : "Saved app settings; integration unchanged", integrationSaved);
         if (_alwaysStartAsAdmin.Checked && !IsAdministrator())
         {
             MessageBox.Show(this, "FastTaskMgr will request administrator rights the next time it starts.", "FastTaskMgr", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
+    }
+
+    private bool ApplyTaskManagerReplacement()
+    {
+        try
+        {
+            SetTaskManagerReplacement(_replaceTaskManager.Checked);
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            _replaceTaskManager.Checked = IsTaskManagerReplacementEnabled();
+            MessageBox.Show(this, "Run FastTaskMgr as administrator to change the Task Manager shortcut setting.", "FastTaskMgr", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _replaceTaskManager.Checked = IsTaskManagerReplacementEnabled();
+            MessageBox.Show(this, ex.Message, "FastTaskMgr", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+    }
+
+    private void ShowSaveStatus(string text, bool success)
+    {
+        _saveStatusTimer.Stop();
+        _saveStatus.Text = text;
+        _saveStatus.ForeColor = success ? Color.ForestGreen : Color.DarkOrange;
+        _save.BackColor = success ? Color.FromArgb(218, 244, 226) : Color.FromArgb(255, 241, 204);
+        _saveStatusTimer.Start();
+    }
+
+    private void ClearSaveStatus()
+    {
+        _saveStatusTimer.Stop();
+        _saveStatus.Text = "";
+        _save.BackColor = SystemColors.Control;
     }
 
     private async Task CheckForUpdatesAsync()
@@ -243,4 +341,49 @@ internal sealed class SettingsPage : PageBase
         WindowsPrincipal principal = new(identity);
         return principal.IsInRole(WindowsBuiltInRole.Administrator);
     }
+
+    private static bool IsTaskManagerReplacementEnabled() => DebuggerTargetsThisApp(ReadTaskManagerDebugger());
+
+    private static string? ReadTaskManagerDebugger()
+    {
+        using RegistryKey root = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+        using RegistryKey? key = root.OpenSubKey(TaskManagerIfeoKey);
+        return Convert.ToString(key?.GetValue("Debugger"));
+    }
+
+    private static void SetTaskManagerReplacement(bool enabled)
+    {
+        using RegistryKey root = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+        if (!enabled)
+        {
+            using RegistryKey? existingKey = root.OpenSubKey(TaskManagerIfeoKey, writable: true);
+            string? existing = Convert.ToString(existingKey?.GetValue("Debugger"));
+            if (existingKey is not null && DebuggerTargetsThisApp(existing))
+            {
+                existingKey.DeleteValue("Debugger", throwOnMissingValue: false);
+            }
+
+            return;
+        }
+
+        using RegistryKey key = root.CreateSubKey(TaskManagerIfeoKey, writable: true)
+            ?? throw new InvalidOperationException("Could not open the Task Manager registry key.");
+        string? current = Convert.ToString(key.GetValue("Debugger"));
+        if (!string.IsNullOrWhiteSpace(current) && !DebuggerTargetsThisApp(current))
+        {
+            throw new InvalidOperationException("Task Manager is already redirected by another debugger value.");
+        }
+
+        key.SetValue("Debugger", QuotePath(Application.ExecutablePath), RegistryValueKind.String);
+    }
+
+    private static bool DebuggerTargetsThisApp(string? debugger)
+    {
+        string expected = QuotePath(Application.ExecutablePath);
+        string value = debugger?.Trim() ?? "";
+        return value.Equals(expected, StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith(expected + " ", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string QuotePath(string path) => "\"" + path.Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
 }

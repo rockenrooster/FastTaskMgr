@@ -48,8 +48,8 @@ jobs:
         run: |
           gh release view $env:TAG *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:TAG artifacts\FastTaskMgr.exe artifacts\FastTaskMgr.exe.sha256 --clobber
+            gh release upload $env:TAG artifacts\FastTaskMgr.exe artifacts\FastTaskMgr.exe.sha256 artifacts\FastTaskMgr-Setup.ps1 artifacts\FastTaskMgr-Setup.ps1.sha256 --clobber
           }
           else {
-            gh release create $env:TAG artifacts\FastTaskMgr.exe artifacts\FastTaskMgr.exe.sha256 --verify-tag --title $env:TAG --notes "FastTaskMgr $env:TAG"
+            gh release create $env:TAG artifacts\FastTaskMgr.exe artifacts\FastTaskMgr.exe.sha256 artifacts\FastTaskMgr-Setup.ps1 artifacts\FastTaskMgr-Setup.ps1.sha256 --verify-tag --title $env:TAG --notes "FastTaskMgr $env:TAG"
           }

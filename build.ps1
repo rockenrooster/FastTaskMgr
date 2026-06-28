@@ -47,6 +47,9 @@ $publishExe = Join-Path $publishDir "FastTaskMgr.exe"
 $artifactDir = Join-Path $PSScriptRoot "artifacts"
 $artifactExe = Join-Path $artifactDir "FastTaskMgr.exe"
 $artifactSha = Join-Path $artifactDir "FastTaskMgr.exe.sha256"
+$installerSource = Join-Path $PSScriptRoot "installer\FastTaskMgr-Setup.ps1"
+$installerArtifact = Join-Path $artifactDir "FastTaskMgr-Setup.ps1"
+$installerSha = Join-Path $artifactDir "FastTaskMgr-Setup.ps1.sha256"
 
 New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
 try {
@@ -58,5 +61,9 @@ catch {
 
 $hash = (Get-FileHash $artifactExe -Algorithm SHA256).Hash.ToLowerInvariant()
 "$hash  FastTaskMgr.exe" | Set-Content $artifactSha
+
+Copy-Item $installerSource $installerArtifact -Force
+$installerHash = (Get-FileHash $installerArtifact -Algorithm SHA256).Hash.ToLowerInvariant()
+"$installerHash  FastTaskMgr-Setup.ps1" | Set-Content $installerSha
 
 Write-Host "Published $artifactExe ($newVersion)" -ForegroundColor Green
