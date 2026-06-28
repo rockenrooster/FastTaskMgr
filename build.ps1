@@ -13,6 +13,7 @@ function RunDotnet {
 }
 
 $csprojPath = Join-Path $PSScriptRoot "src\FastTaskMgr\FastTaskMgr.csproj"
+$setupCsprojPath = Join-Path $PSScriptRoot "src\FastTaskMgr.Setup\FastTaskMgr.Setup.csproj"
 $content = Get-Content $csprojPath -Raw
 
 if ($Version) {
@@ -38,20 +39,29 @@ $content = $content -replace '<FileVersion>.*?</FileVersion>', "<FileVersion>$ne
 Set-Content $csprojPath -Value $content -NoNewline
 
 $publishDir = Join-Path $PSScriptRoot "src\FastTaskMgr\obj\script-publish"
+$setupPayloadDir = Join-Path $PSScriptRoot "src\FastTaskMgr.Setup\Payload"
+$setupPublishDir = Join-Path $PSScriptRoot "src\FastTaskMgr.Setup\obj\script-publish"
 Remove-Item $publishDir -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $setupPublishDir -Recurse -Force -ErrorAction SilentlyContinue
 
 RunDotnet clean $csprojPath -c Release
 RunDotnet publish $csprojPath -c Release -r win-x64 --self-contained false -o $publishDir /p:PublishSingleFile=true /p:PublishReadyToRun=true
 
 $publishExe = Join-Path $publishDir "FastTaskMgr.exe"
+New-Item -ItemType Directory -Path $setupPayloadDir -Force | Out-Null
+Copy-Item $publishExe (Join-Path $setupPayloadDir "FastTaskMgr.exe") -Force
+RunDotnet publish $setupCsprojPath -c Release -r win-x64 --self-contained false -o $setupPublishDir /p:PublishSingleFile=true /p:PublishReadyToRun=true /p:AssemblyVersion=$newVersion /p:FileVersion=$newVersion
+
 $artifactDir = Join-Path $PSScriptRoot "artifacts"
 $artifactExe = Join-Path $artifactDir "FastTaskMgr.exe"
 $artifactSha = Join-Path $artifactDir "FastTaskMgr.exe.sha256"
-$installerSource = Join-Path $PSScriptRoot "installer\FastTaskMgr-Setup.ps1"
-$installerArtifact = Join-Path $artifactDir "FastTaskMgr-Setup.ps1"
-$installerSha = Join-Path $artifactDir "FastTaskMgr-Setup.ps1.sha256"
+$setupExe = Join-Path $setupPublishDir "FastTaskMgr.Setup.exe"
+$setupArtifact = Join-Path $artifactDir "FastTaskMgr-Setup.exe"
+$setupSha = Join-Path $artifactDir "FastTaskMgr-Setup.exe.sha256"
 
 New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
+Remove-Item (Join-Path $artifactDir "FastTaskMgr-Setup.ps1") -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $artifactDir "FastTaskMgr-Setup.ps1.sha256") -Force -ErrorAction SilentlyContinue
 try {
     Copy-Item $publishExe $artifactExe -Force -ErrorAction Stop
 }
@@ -62,8 +72,8 @@ catch {
 $hash = (Get-FileHash $artifactExe -Algorithm SHA256).Hash.ToLowerInvariant()
 "$hash  FastTaskMgr.exe" | Set-Content $artifactSha
 
-Copy-Item $installerSource $installerArtifact -Force
-$installerHash = (Get-FileHash $installerArtifact -Algorithm SHA256).Hash.ToLowerInvariant()
-"$installerHash  FastTaskMgr-Setup.ps1" | Set-Content $installerSha
+Copy-Item $setupExe $setupArtifact -Force
+$setupHash = (Get-FileHash $setupArtifact -Algorithm SHA256).Hash.ToLowerInvariant()
+"$setupHash  FastTaskMgr-Setup.exe" | Set-Content $setupSha
 
 Write-Host "Published $artifactExe ($newVersion)" -ForegroundColor Green

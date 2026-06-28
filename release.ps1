@@ -112,6 +112,17 @@ if ([version]$fileVersion -ne [version]$Version) {
 }
 Write-Host "Verified local artifact FileVersion $fileVersion for $tag" -ForegroundColor Cyan
 
+$setupExe = Join-Path $PSScriptRoot "artifacts\FastTaskMgr-Setup.exe"
+$setupSha = Join-Path $PSScriptRoot "artifacts\FastTaskMgr-Setup.exe.sha256"
+if (!(Test-Path $setupExe) -or !(Test-Path $setupSha)) {
+    throw "Build did not create the setup artifacts."
+}
+
+$setupVersion = (Get-Item $setupExe).VersionInfo.FileVersion
+if ([version]$setupVersion -ne [version]$Version) {
+    throw "Setup FileVersion $setupVersion does not match $Version."
+}
+
 RunGit add -A
 
 git diff --cached --quiet

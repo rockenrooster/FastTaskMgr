@@ -13,9 +13,13 @@
     <PublishTrimmed>false</PublishTrimmed>
     <DebugType>embedded</DebugType>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <AssemblyVersion>0.1.0.10</AssemblyVersion>
-    <FileVersion>0.1.0.10</FileVersion>
-    <ApplicationIcon>Assets\FastTaskMgr.ico</ApplicationIcon>
+    <AssemblyVersion>0.1.0.0</AssemblyVersion>
+    <FileVersion>0.1.0.0</FileVersion>
+    <ApplicationIcon>..\FastTaskMgr\Assets\FastTaskMgr.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Payload\FastTaskMgr.exe" LogicalName="FastTaskMgr.exe" Condition="Exists('Payload\FastTaskMgr.exe')" />
+  </ItemGroup>
 
 </Project>
