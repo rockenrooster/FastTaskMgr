@@ -127,4 +127,4 @@ RunGit push -u origin $branch
 RunGit tag $tag
 RunGit push origin $tag
 
-Write-Host "Pushed $branch and $tag. GitHub Actions can create the release." -ForegroundColor Green
+Write-Host "Pushed $branch and $tag. GitHub Actions will build and upload FastTaskMgr-Setup.exe." -ForegroundColor Green

@@ -13,6 +13,7 @@ internal enum UpdateSpeed
 internal sealed class AppSettings
 {
     public string DefaultPage { get; set; } = "Processes";
+    public string? LastPage { get; set; }
     public UpdateSpeed UpdateSpeed { get; set; } = UpdateSpeed.Normal;
     public bool AlwaysOnTop { get; set; }
     public bool MinimizeOnUse { get; set; }

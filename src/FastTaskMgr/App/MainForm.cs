@@ -40,7 +40,7 @@ internal sealed class MainForm : Form
         BuildLayout();
         RegisterPages();
         _state.SettingsChanged += (_, _) => ApplySettings();
-        ShowPage(_state.Settings.DefaultPage);
+        ShowPage(string.IsNullOrWhiteSpace(_state.Settings.LastPage) ? _state.Settings.DefaultPage : _state.Settings.LastPage);
         ApplySettings();
     }
 
@@ -190,6 +190,7 @@ internal sealed class MainForm : Form
         page.Visible = true;
         page.BringToFront();
         _currentPage = page;
+        _state.Settings.LastPage = key;
         _title.Text = page.Title;
         SetSearchVisible(page.UsesSearch);
         _search.Text = "";

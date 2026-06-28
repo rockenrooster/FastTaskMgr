@@ -148,7 +148,8 @@ internal sealed class PerformancePage : PageBase
         _refreshing = true;
         try
         {
-            PerformanceSample sample = await Task.Run(() => State.Performance.Sample());
+            bool fastFirstPaint = _latest is null && State.Settings.UpdateSpeed != UpdateSpeed.Paused;
+            PerformanceSample sample = await Task.Run(() => State.Performance.Sample(fastFirstPaint));
             if (!IsDisposed)
             {
                 RenderSample(sample);

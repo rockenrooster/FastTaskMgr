@@ -25,7 +25,7 @@ internal sealed class PerformanceSampler : IDisposable
     private ulong _lastKernel;
     private ulong _lastUser;
 
-    public PerformanceSample Sample()
+    public PerformanceSample Sample(bool fastFirstPaint = false)
     {
         lock (_lock)
         {
@@ -50,9 +50,9 @@ internal sealed class PerformanceSampler : IDisposable
                 info.ThreadCount,
                 info.HandleCount,
                 TimeSpan.FromMilliseconds(Environment.TickCount64),
-                SampleDisks(),
+                SampleDisks(fastFirstPaint),
                 SampleNetworks(),
-                SampleGpus());
+                fastFirstPaint ? [] : SampleGpus());
         }
     }
 
@@ -113,7 +113,7 @@ internal sealed class PerformanceSampler : IDisposable
         return values;
     }
 
-    private DiskPerformanceSample[] SampleDisks()
+    private DiskPerformanceSample[] SampleDisks(bool fastFirstPaint)
     {
         List<DiskPerformanceSample> disks = [];
         int index = 0;
@@ -126,9 +126,9 @@ internal sealed class PerformanceSampler : IDisposable
                 $"disk:{drive.Name}",
                 $"Disk {index} ({drive.Name.TrimEnd('\\')})",
                 drive.DriveFormat,
-                ReadCounter(_diskActiveCounters, "% Disk Time", index.ToString()),
-                ReadCounter(_diskReadCounters, "Disk Read Bytes/sec", index.ToString()),
-                ReadCounter(_diskWriteCounters, "Disk Write Bytes/sec", index.ToString()),
+                fastFirstPaint ? 0 : ReadCounter(_diskActiveCounters, "% Disk Time", index.ToString()),
+                fastFirstPaint ? 0 : ReadCounter(_diskReadCounters, "Disk Read Bytes/sec", index.ToString()),
+                fastFirstPaint ? 0 : ReadCounter(_diskWriteCounters, "Disk Write Bytes/sec", index.ToString()),
                 used,
                 free,
                 total));
