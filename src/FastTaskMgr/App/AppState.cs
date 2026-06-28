@@ -8,22 +8,23 @@ namespace FastTaskMgr.App;
 
 internal sealed class AppState : IDisposable
 {
+    private readonly Lazy<ProcessSampler> _processes = new(() => new ProcessSampler());
+    private readonly Lazy<PerformanceSampler> _performance = new(() => new PerformanceSampler());
+    private readonly Lazy<ServiceRepository> _services = new(() => new ServiceRepository());
+    private readonly Lazy<StartupRepository> _startup = new(() => new StartupRepository());
+    private readonly Lazy<UpdateService> _updates = new(() => new UpdateService());
+
     private AppState(AppSettings settings)
     {
         Settings = settings;
-        Processes = new ProcessSampler();
-        Performance = new PerformanceSampler();
-        Services = new ServiceRepository();
-        Startup = new StartupRepository();
-        Updates = new UpdateService();
     }
 
     public AppSettings Settings { get; }
-    public ProcessSampler Processes { get; }
-    public PerformanceSampler Performance { get; }
-    public ServiceRepository Services { get; }
-    public StartupRepository Startup { get; }
-    public UpdateService Updates { get; }
+    public ProcessSampler Processes => _processes.Value;
+    public PerformanceSampler Performance => _performance.Value;
+    public ServiceRepository Services => _services.Value;
+    public StartupRepository Startup => _startup.Value;
+    public UpdateService Updates => _updates.Value;
 
     public event EventHandler? SettingsChanged;
 
@@ -38,7 +39,14 @@ internal sealed class AppState : IDisposable
     public void Dispose()
     {
         Settings.Save();
-        Performance.Dispose();
-        Updates.Dispose();
+        if (_performance.IsValueCreated)
+        {
+            _performance.Value.Dispose();
+        }
+
+        if (_updates.IsValueCreated)
+        {
+            _updates.Value.Dispose();
+        }
     }
 }

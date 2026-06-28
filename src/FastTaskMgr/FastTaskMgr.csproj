@@ -13,8 +13,8 @@
     <PublishTrimmed>false</PublishTrimmed>
     <DebugType>embedded</DebugType>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <AssemblyVersion>0.1.0.13</AssemblyVersion>
-    <FileVersion>0.1.0.13</FileVersion>
+    <AssemblyVersion>0.1.0.14</AssemblyVersion>
+    <FileVersion>0.1.0.14</FileVersion>
     <ApplicationIcon>Assets\FastTaskMgr.ico</ApplicationIcon>
   </PropertyGroup>
 

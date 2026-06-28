@@ -124,7 +124,7 @@ internal sealed class DetailsPage : PageBase
         _refreshing = true;
         try
         {
-            IReadOnlyList<ProcessRow> rows = await Task.Run(State.Processes.Sample);
+            IReadOnlyList<ProcessRow> rows = await Task.Run(() => State.Processes.Sample(includeDetails: true));
             if (!IsDisposed)
             {
                 _rows = rows;

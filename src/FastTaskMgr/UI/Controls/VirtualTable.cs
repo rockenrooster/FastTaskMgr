@@ -42,43 +42,56 @@ internal sealed class VirtualTable<T> : ListView
 
     public void SetRows(IEnumerable<T> rows)
     {
-        HashSet<object> selectedKeys = SelectedIndices
-            .Cast<int>()
-            .Where(index => index >= 0 && index < _rows.Count)
-            .Select(index => _keySelector(_rows[index]))
-            .Where(key => key is not null)
-            .Select(key => key!)
-            .ToHashSet();
-
-        TableColumn<T> column = _columns[_sortColumn];
-        Func<T, IComparable?> key = column.SortKey ?? (row => column.Text(row));
-        IOrderedEnumerable<T> sorted = _sortDescending
-            ? rows.OrderByDescending(key, Comparer<IComparable?>.Create(CompareNullable))
-            : rows.OrderBy(key, Comparer<IComparable?>.Create(CompareNullable));
-
-        _rows = sorted.ToArray();
-        VirtualListSize = _rows.Count;
-        SelectedIndices.Clear();
-
-        if (selectedKeys.Count > 0)
+        BeginUpdate();
+        try
         {
-            for (int index = 0; index < _rows.Count; index++)
+            HashSet<object> selectedKeys = SelectedIndices
+                .Cast<int>()
+                .Where(index => index >= 0 && index < _rows.Count)
+                .Select(index => _keySelector(_rows[index]))
+                .Where(key => key is not null)
+                .Select(key => key!)
+                .ToHashSet();
+
+            TableColumn<T> column = _columns[_sortColumn];
+            Func<T, IComparable?> key = column.SortKey ?? (row => column.Text(row));
+            IOrderedEnumerable<T> sorted = _sortDescending
+                ? rows.OrderByDescending(key, Comparer<IComparable?>.Create(CompareNullable))
+                : rows.OrderBy(key, Comparer<IComparable?>.Create(CompareNullable));
+
+            _rows = sorted.ToArray();
+            VirtualListSize = _rows.Count;
+            SelectedIndices.Clear();
+
+            if (selectedKeys.Count > 0)
             {
-                object? rowKey = _keySelector(_rows[index]);
-                if (rowKey is not null && selectedKeys.Contains(rowKey))
+                for (int index = 0; index < _rows.Count; index++)
                 {
-                    SelectedIndices.Add(index);
+                    object? rowKey = _keySelector(_rows[index]);
+                    if (rowKey is not null && selectedKeys.Contains(rowKey))
+                    {
+                        SelectedIndices.Add(index);
+                    }
                 }
             }
-        }
 
-        Invalidate();
+            Invalidate();
+        }
+        finally
+        {
+            EndUpdate();
+        }
     }
 
     protected override void OnRetrieveVirtualItem(RetrieveVirtualItemEventArgs e)
     {
         T row = _rows[e.ItemIndex];
-        string[] subItems = _columns.Select(column => column.Text(row)).ToArray();
+        string[] subItems = new string[_columns.Count];
+        for (int index = 0; index < _columns.Count; index++)
+        {
+            subItems[index] = _columns[index].Text(row);
+        }
+
         e.Item = new ListViewItem(subItems);
     }
 

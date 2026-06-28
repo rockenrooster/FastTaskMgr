@@ -6,10 +6,11 @@ namespace FastTaskMgr.Core.Processes;
 internal sealed class ProcessSampler
 {
     private readonly Lock _lock = new();
+    private readonly Dictionary<string, string> _descriptionsByPath = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<int, TimeSpan> _lastCpuTimes = [];
     private DateTime _lastSampleUtc = DateTime.UtcNow;
 
-    public IReadOnlyList<ProcessRow> Sample()
+    public IReadOnlyList<ProcessRow> Sample(bool includeDetails = false)
     {
         lock (_lock)
         {
@@ -22,7 +23,7 @@ internal sealed class ProcessSampler
             {
                 using (process)
                 {
-                    ProcessRow? row = TryReadProcess(process, elapsedSeconds, nextCpuTimes);
+                    ProcessRow? row = TryReadProcess(process, elapsedSeconds, nextCpuTimes, includeDetails);
                     if (row is not null)
                     {
                         rows.Add(row);
@@ -32,11 +33,11 @@ internal sealed class ProcessSampler
 
             _lastCpuTimes = nextCpuTimes;
             _lastSampleUtc = now;
-            return rows.OrderBy(row => row.Name, StringComparer.OrdinalIgnoreCase).ThenBy(row => row.ProcessId).ToArray();
+            return rows;
         }
     }
 
-    private ProcessRow? TryReadProcess(Process process, double elapsedSeconds, Dictionary<int, TimeSpan> nextCpuTimes)
+    private ProcessRow? TryReadProcess(Process process, double elapsedSeconds, Dictionary<int, TimeSpan> nextCpuTimes, bool includeDetails)
     {
         int pid;
         try
@@ -60,9 +61,21 @@ internal sealed class ProcessSampler
 
         string? path = NativeMethods.QueryProcessImagePath(pid);
         string description = "";
-        if (!string.IsNullOrWhiteSpace(path))
+        string userName = "";
+        string architecture = "";
+        string priority = "";
+        string affinity = "";
+        if (includeDetails)
         {
-            description = Safe(() => FileVersionInfo.GetVersionInfo(path).FileDescription ?? "", "");
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                description = DescriptionFor(path);
+            }
+
+            userName = NativeMethods.QueryProcessUserName(pid) ?? "";
+            architecture = NativeMethods.QueryProcessArchitecture(pid);
+            priority = NativeMethods.QueryPriority(pid);
+            affinity = NativeMethods.QueryAffinity(pid);
         }
 
         bool hasWindow = Safe(() => process.MainWindowHandle != IntPtr.Zero, false);
@@ -70,7 +83,7 @@ internal sealed class ProcessSampler
 
         return new ProcessRow(
             pid,
-            NativeMethods.QueryParentProcessId(pid),
+            null,
             name,
             responding ? "Running" : "Not responding",
             Math.Min(100, cpuPercent),
@@ -78,11 +91,29 @@ internal sealed class ProcessSampler
             Safe(() => process.Threads.Count, 0),
             Safe(() => process.HandleCount, 0),
             path,
-            NativeMethods.QueryProcessUserName(pid) ?? "",
-            NativeMethods.QueryProcessArchitecture(pid),
+            userName,
+            architecture,
             description,
-            NativeMethods.QueryPriority(pid),
-            NativeMethods.QueryAffinity(pid));
+            priority,
+            affinity);
+    }
+
+    private string DescriptionFor(string path)
+    {
+        if (_descriptionsByPath.TryGetValue(path, out string? description))
+        {
+            return description;
+        }
+
+        description = Safe(() => FileVersionInfo.GetVersionInfo(path).FileDescription ?? "", "");
+        // ponytail: clear-on-churn beats an LRU until path churn is actually measurable.
+        if (_descriptionsByPath.Count > 2048)
+        {
+            _descriptionsByPath.Clear();
+        }
+
+        _descriptionsByPath[path] = description;
+        return description;
     }
 
     private static T Safe<T>(Func<T> read, T fallback)

@@ -170,8 +170,20 @@ internal static partial class NativeMethods
             return null;
         }
 
-        StringBuilder path = new(32768);
+        StringBuilder path = new(1024);
         int length = path.Capacity;
+        if (QueryFullProcessImageName(process, 0, path, ref length))
+        {
+            return path.ToString();
+        }
+
+        if (Marshal.GetLastWin32Error() != ErrorInsufficientBuffer)
+        {
+            return null;
+        }
+
+        path = new StringBuilder(32768);
+        length = path.Capacity;
         return QueryFullProcessImageName(process, 0, path, ref length) ? path.ToString() : null;
     }
 

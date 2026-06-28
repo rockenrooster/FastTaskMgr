@@ -11,12 +11,15 @@ internal sealed class MainForm : Form
     private readonly Label _title = new();
     private readonly TextBox _search = new();
     private readonly Dictionary<string, Button> _navButtons = [];
+    private readonly Dictionary<string, Func<IAppPage>> _pageFactories = [];
     private readonly Dictionary<string, IAppPage> _pages = [];
+    private readonly Font _navSelectedFont;
     private IAppPage? _currentPage;
 
     public MainForm(AppState state)
     {
         _state = state;
+        _navSelectedFont = new Font(Font, FontStyle.Bold);
         Text = "FastTaskMgr";
         Icon? appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         if (appIcon is not null)
@@ -40,7 +43,6 @@ internal sealed class MainForm : Form
         _state.Updates.StatusChanged += (_, _) => RunOnUiThread(UpdateSettingsMarker);
         ShowPage(_state.Settings.DefaultPage);
         ApplySettings();
-        _ = _state.Updates.CheckAsync();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -90,7 +92,7 @@ internal sealed class MainForm : Form
             AutoSize = false,
             Height = 42,
             Width = 156,
-            Font = new Font(Font, FontStyle.Bold),
+            Font = _navSelectedFont,
             TextAlign = ContentAlignment.MiddleLeft
         };
         nav.Controls.Add(brand);
@@ -150,30 +152,28 @@ internal sealed class MainForm : Form
 
     private void RegisterPages()
     {
-        AddPage("Processes", new ProcessesPage(_state));
-        AddPage("Performance", new PerformancePage(_state));
-        AddPage("Startup apps", new StartupPage(_state));
-        AddPage("Users", new StubPage(_state, "Users", "TODO: WTS session/process rollup."));
-        AddPage("Details", new DetailsPage(_state));
-        AddPage("Services", new ServicesPage(_state));
-        AddPage("Settings", new SettingsPage(_state));
+        AddPage("Processes", () => new ProcessesPage(_state));
+        AddPage("Performance", () => new PerformancePage(_state));
+        AddPage("Startup apps", () => new StartupPage(_state));
+        AddPage("Users", () => new StubPage(_state, "Users", "TODO: WTS session/process rollup."));
+        AddPage("Details", () => new DetailsPage(_state));
+        AddPage("Services", () => new ServicesPage(_state));
+        AddPage("Settings", () => new SettingsPage(_state));
     }
 
-    private void AddPage(string key, IAppPage page)
+    private void AddPage(string key, Func<IAppPage> factory)
     {
-        _pages[key] = page;
-        _pageHost.Controls.Add((Control)page);
-        ((Control)page).Visible = false;
+        _pageFactories[key] = factory;
     }
 
     private void ShowPage(string key)
     {
-        if (!_pages.TryGetValue(key, out IAppPage? page))
+        if (!_pageFactories.ContainsKey(key))
         {
-            page = _pages["Processes"];
             key = "Processes";
         }
 
+        IAppPage page = GetPage(key);
         _currentPage?.OnHide();
         foreach (Control control in _pageHost.Controls)
         {
@@ -191,8 +191,24 @@ internal sealed class MainForm : Form
 
         foreach ((string navKey, Button button) in _navButtons)
         {
-            button.Font = new Font(button.Font, navKey == key ? FontStyle.Bold : FontStyle.Regular);
+            button.Font = navKey == key ? _navSelectedFont : Font;
         }
+    }
+
+    private IAppPage GetPage(string key)
+    {
+        if (_pages.TryGetValue(key, out IAppPage? page))
+        {
+            return page;
+        }
+
+        page = _pageFactories[key]();
+        Control pageControl = (Control)page;
+        pageControl.Visible = false;
+        _pageHost.Controls.Add(pageControl);
+        AppTheme.Apply(pageControl, _state.Settings.Theme);
+        _pages[key] = page;
+        return page;
     }
 
     private void ApplySettings()
@@ -246,5 +262,15 @@ internal sealed class MainForm : Form
         }
 
         action();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+
+        if (disposing)
+        {
+            _navSelectedFont.Dispose();
+        }
     }
 }

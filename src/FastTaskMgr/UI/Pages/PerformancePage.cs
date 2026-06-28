@@ -29,6 +29,7 @@ internal sealed class PerformancePage : PageBase
     private int _cpuGridColumns;
     private string _selectedKey = "cpu";
     private PerformanceSample? _latest;
+    private bool _refreshing;
 
     public PerformancePage(AppState state)
         : base(state)
@@ -97,17 +98,17 @@ internal sealed class PerformancePage : PageBase
         _detailStats.Resize += (_, _) => ReflowStats();
         detail.Controls.Add(_detailStats, 0, 2);
 
-        _timer.Tick += (_, _) => RefreshSample();
+        _timer.Tick += async (_, _) => await RefreshSampleAsync();
         State.SettingsChanged += (_, _) => ConfigureTimer();
     }
 
     public override string Title => "Performance";
     public override bool UsesSearch => false;
 
-    public override void OnShow()
+    public override async void OnShow()
     {
         ConfigureTimer();
-        RefreshSample();
+        await RefreshSampleAsync();
     }
 
     public override void OnHide() => _timer.Stop();
@@ -137,14 +138,31 @@ internal sealed class PerformancePage : PageBase
         }
     }
 
-    private void RefreshSample()
+    private async Task RefreshSampleAsync()
     {
-        if ((ModifierKeys & Keys.Control) == Keys.Control)
+        if (_refreshing || IsDisposed || (ModifierKeys & Keys.Control) == Keys.Control)
         {
             return;
         }
 
-        _latest = State.Performance.Sample();
+        _refreshing = true;
+        try
+        {
+            PerformanceSample sample = await Task.Run(() => State.Performance.Sample());
+            if (!IsDisposed)
+            {
+                RenderSample(sample);
+            }
+        }
+        finally
+        {
+            _refreshing = false;
+        }
+    }
+
+    private void RenderSample(PerformanceSample sample)
+    {
+        _latest = sample;
         AddHistory("cpu", _latest.CpuPercent);
         for (int index = 0; index < _latest.CpuCorePercents.Count; index++)
         {
