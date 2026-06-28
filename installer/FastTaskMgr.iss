@@ -51,3 +51,4 @@ Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\FastTas
 
 [Run]
 Filename: "{app}\FastTaskMgr.exe"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\FastTaskMgr.exe"; Flags: nowait skipifnotsilent

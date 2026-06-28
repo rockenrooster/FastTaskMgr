@@ -15,7 +15,6 @@ internal sealed class UpdateService : IDisposable
     private bool _isChecking;
     private bool _isDownloading;
     private double _downloadProgress;
-    private string? _downloadedFile;
 
     public UpdateService()
     {
@@ -63,17 +62,6 @@ internal sealed class UpdateService : IDisposable
         }
     }
 
-    public string? DownloadedFile
-    {
-        get
-        {
-            lock (_lock)
-            {
-                return _downloadedFile;
-            }
-        }
-    }
-
     public Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken = default)
     {
         lock (_lock)
@@ -96,22 +84,14 @@ internal sealed class UpdateService : IDisposable
             throw new InvalidOperationException("No downloadable update is available.");
         }
 
-        SetDownloading(true, 0, null);
+        SetDownloading(true, 0);
         string updateDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "FastTaskMgr",
             "Updates");
         Directory.CreateDirectory(updateDir);
 
-        string version = CleanFileName(result.LatestVersionText);
-        string assetName = result.AssetName ?? "FastTaskMgr.exe";
-        string? extension = Path.GetExtension(assetName);
-        if (string.IsNullOrWhiteSpace(extension))
-        {
-            extension = ".exe";
-        }
-
-        string targetPath = Path.Combine(updateDir, $"FastTaskMgr-{version}-{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid():N}{extension}");
+        string targetPath = Path.Combine(updateDir, "FastTaskMgr-Setup.exe");
         string tempPath = targetPath + ".download";
 
         try
@@ -144,26 +124,29 @@ internal sealed class UpdateService : IDisposable
             }
 
             File.Move(tempPath, targetPath, overwrite: true);
-            SetDownloading(false, 100, targetPath);
+            SetDownloading(false, 100);
             return targetPath;
         }
         catch
         {
             TryDelete(tempPath);
-            SetDownloading(false, 0, null);
+            SetDownloading(false, 0);
             throw;
         }
     }
 
-    public void InstallDownloadedUpdate()
+    public void InstallDownloadedUpdate(string setupPath)
     {
-        string sourcePath = DownloadedFile ?? throw new InvalidOperationException("Download the update before installing.");
-        if (!File.Exists(sourcePath))
+        if (!File.Exists(setupPath))
         {
-            throw new FileNotFoundException("Downloaded update file was not found.", sourcePath);
+            throw new FileNotFoundException("Downloaded update file was not found.", setupPath);
         }
 
-        Process.Start(new ProcessStartInfo(sourcePath) { UseShellExecute = true });
+        Process.Start(new ProcessStartInfo(setupPath)
+        {
+            Arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS",
+            UseShellExecute = true
+        });
     }
 
     public void Dispose() => _http.Dispose();
@@ -243,13 +226,12 @@ internal sealed class UpdateService : IDisposable
         StatusChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    private void SetDownloading(bool value, double progress, string? downloadedFile)
+    private void SetDownloading(bool value, double progress)
     {
         lock (_lock)
         {
             _isDownloading = value;
             _downloadProgress = progress;
-            _downloadedFile = downloadedFile;
         }
 
         StatusChanged?.Invoke(this, EventArgs.Empty);
@@ -306,13 +288,6 @@ internal sealed class UpdateService : IDisposable
         Math.Max(0, version.Minor),
         Math.Max(0, version.Build),
         Math.Max(0, version.Revision));
-
-    private static string CleanFileName(string value)
-    {
-        char[] invalid = Path.GetInvalidFileNameChars();
-        string cleaned = new(value.Select(character => invalid.Contains(character) ? '-' : character).ToArray());
-        return string.IsNullOrWhiteSpace(cleaned) ? "update" : cleaned;
-    }
 
     private static void TryDelete(string path)
     {

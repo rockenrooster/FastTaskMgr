@@ -313,8 +313,8 @@ internal sealed class SettingsPage : PageBase
     {
         try
         {
-            await State.Updates.DownloadLatestAsync();
-            State.Updates.InstallDownloadedUpdate();
+            string setupPath = await State.Updates.DownloadLatestAsync();
+            State.Updates.InstallDownloadedUpdate(setupPath);
             Application.Exit();
         }
         catch (Exception ex)
@@ -338,7 +338,6 @@ internal sealed class SettingsPage : PageBase
         bool checking = State.Updates.IsChecking;
         bool downloading = State.Updates.IsDownloading;
         double progress = State.Updates.DownloadProgress;
-        string? downloadedFile = State.Updates.DownloadedFile;
         _currentVersion.Text = State.Updates.CurrentVersion.ToString();
         _latestVersion.Text = checking ? "Checking..." : State.Updates.LastResult?.LatestVersionText ?? "Not checked";
         _checkUpdates.Enabled = !checking && !downloading;
@@ -348,10 +347,6 @@ internal sealed class SettingsPage : PageBase
         if (downloading)
         {
             _updateStatus.Text = $"Downloading {progress:0}%";
-        }
-        else if (!string.IsNullOrWhiteSpace(downloadedFile))
-        {
-            _updateStatus.Text = $"Downloaded to {downloadedFile}";
         }
         else
         {
