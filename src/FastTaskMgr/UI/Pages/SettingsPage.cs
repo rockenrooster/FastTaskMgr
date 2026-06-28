@@ -47,26 +47,26 @@ internal sealed class SettingsPage : PageBase
         ConfigureCombo(_updateSpeed, Enum.GetNames<UpdateSpeed>());
         ConfigureCombo(_theme, ["System", "Light", "Dark"]);
 
-        TableLayoutPanel general = AddSection(root, "General", 146);
+        TableLayoutPanel general = AddSection(root, "General");
         AddRow(general, "Default start page", _defaultPage);
         AddRow(general, "Real-time update speed", _updateSpeed);
         AddRow(general, "Theme", _theme);
 
-        TableLayoutPanel behavior = AddSection(root, "Behavior", 186);
-        AddRow(behavior, "", _alwaysOnTop);
-        AddRow(behavior, "", _minimizeOnUse);
-        AddRow(behavior, "", _hideWhenMinimized);
-        AddRow(behavior, "", _confirmEnd);
-        AddRow(behavior, "", _confirmEfficiency);
+        TableLayoutPanel behavior = AddSection(root, "Behavior");
+        AddCheckRow(behavior, _alwaysOnTop);
+        AddCheckRow(behavior, _minimizeOnUse);
+        AddCheckRow(behavior, _hideWhenMinimized);
+        AddCheckRow(behavior, _confirmEnd);
+        AddCheckRow(behavior, _confirmEfficiency);
 
-        TableLayoutPanel integration = AddSection(root, "Windows Integration", 106);
-        AddRow(integration, "", _alwaysStartAsAdmin);
-        AddRow(integration, "", _replaceTaskManager);
+        TableLayoutPanel integration = AddSection(root, "Windows Integration");
+        AddCheckRow(integration, _alwaysStartAsAdmin);
+        AddCheckRow(integration, _replaceTaskManager);
 
-        TableLayoutPanel updates = AddSection(root, "Updates", 174);
-        AddRow(updates, "", BuildUpdatePanel(), 142);
+        TableLayoutPanel updates = AddSection(root, "Updates");
+        AddWideRow(updates, BuildUpdatePanel());
 
-        TableLayoutPanel actions = AddSection(root, "Save", 72);
+        TableLayoutPanel actions = AddSection(root, "Save");
         FlowLayoutPanel saveRow = new()
         {
             AutoSize = true,
@@ -75,7 +75,7 @@ internal sealed class SettingsPage : PageBase
         };
         saveRow.Controls.Add(_save);
         saveRow.Controls.Add(_saveStatus);
-        AddRow(actions, "", saveRow);
+        AddWideRow(actions, saveRow);
 
         _save.Click += (_, _) => Save();
         _saveStatusTimer.Tick += (_, _) => ClearSaveStatus();
@@ -85,6 +85,7 @@ internal sealed class SettingsPage : PageBase
     }
 
     public override string Title => "Settings";
+    public override bool UsesSearch => false;
 
     public override void OnShow()
     {
@@ -113,13 +114,14 @@ internal sealed class SettingsPage : PageBase
         combo.Items.AddRange(values);
     }
 
-    private static TableLayoutPanel AddSection(FlowLayoutPanel root, string title, int height)
+    private static TableLayoutPanel AddSection(FlowLayoutPanel root, string title)
     {
         GroupBox group = new()
         {
             Text = title,
             Width = 720,
-            Height = height,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Margin = new Padding(0, 0, 0, 12),
             Padding = new Padding(10)
         };
@@ -128,6 +130,7 @@ internal sealed class SettingsPage : PageBase
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
+            AutoSize = true,
             Padding = new Padding(8, 12, 8, 8)
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
@@ -207,19 +210,40 @@ internal sealed class SettingsPage : PageBase
     private static void AddRow(TableLayoutPanel form, string labelText, Control editor, int height = 40)
     {
         int row = form.RowStyles.Count;
-        form.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
+        form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         Label label = new()
         {
             Text = labelText,
-            Dock = DockStyle.Fill,
+            AutoSize = true,
+            Margin = new Padding(0, 8, 12, 8),
             TextAlign = ContentAlignment.MiddleLeft
         };
-        editor.Dock = DockStyle.Left;
-        editor.Margin = new Padding(0, 5, 0, 5);
+        editor.Anchor = AnchorStyles.Left;
+        editor.Margin = new Padding(0, 4, 0, 4);
 
         form.Controls.Add(label, 0, row);
         form.Controls.Add(editor, 1, row);
+    }
+
+    private static void AddCheckRow(TableLayoutPanel form, Control editor)
+    {
+        int row = form.RowStyles.Count;
+        form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        editor.Anchor = AnchorStyles.Left;
+        editor.Margin = new Padding(0, 7, 0, 7);
+        form.Controls.Add(editor, 0, row);
+        form.SetColumnSpan(editor, 2);
+    }
+
+    private static void AddWideRow(TableLayoutPanel form, Control editor)
+    {
+        int row = form.RowStyles.Count;
+        form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        editor.Anchor = AnchorStyles.Left;
+        editor.Margin = new Padding(0, 4, 0, 4);
+        form.Controls.Add(editor, 0, row);
+        form.SetColumnSpan(editor, 2);
     }
 
     private void Save()
