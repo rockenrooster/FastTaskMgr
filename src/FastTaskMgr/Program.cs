@@ -2,18 +2,29 @@ using FastTaskMgr.App;
 using FastTaskMgr.Diagnostics;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Principal;
 
 namespace FastTaskMgr;
 
 internal static class Program
 {
+    private const string InstanceMutexName = @"Local\FastTaskMgr.SingleInstance";
+    private const int SwRestore = 9;
+
     [STAThread]
     private static int Main(string[] args)
     {
         if (args.Contains("--self-check", StringComparer.OrdinalIgnoreCase))
         {
             return SelfCheck.Run();
+        }
+
+        using Mutex instanceMutex = new(true, InstanceMutexName, out bool createdNew);
+        if (!createdNew)
+        {
+            FocusExistingInstance();
+            return 0;
         }
 
         ApplicationConfiguration.Initialize();
@@ -61,4 +72,30 @@ internal static class Program
         argument.Contains(' ') || argument.Contains('"')
             ? "\"" + argument.Replace("\"", "\\\"", StringComparison.Ordinal) + "\""
             : argument;
+
+    private static void FocusExistingInstance()
+    {
+        int currentProcessId = Environment.ProcessId;
+        string processName = Process.GetCurrentProcess().ProcessName;
+        foreach (Process process in Process.GetProcessesByName(processName))
+        {
+            using (process)
+            {
+                if (process.Id == currentProcessId || process.MainWindowHandle == IntPtr.Zero)
+                {
+                    continue;
+                }
+
+                _ = ShowWindow(process.MainWindowHandle, SwRestore);
+                _ = SetForegroundWindow(process.MainWindowHandle);
+                return;
+            }
+        }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
 }

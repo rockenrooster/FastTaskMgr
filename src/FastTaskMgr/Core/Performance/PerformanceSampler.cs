@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Diagnostics;
+using System.Text;
 using FastTaskMgr.Core.Native;
 using Microsoft.Win32;
 
@@ -11,6 +12,8 @@ internal sealed class PerformanceSampler : IDisposable
 {
     private readonly Lock _lock = new();
     private readonly CpuInfo _cpuInfo = ReadCpuInfo();
+    private readonly MemorySpec _memorySpec = ReadMemorySpec();
+    private readonly GpuInfo _gpuInfo = ReadGpuInfo();
     private readonly HashSet<string> _physicalAdapterIds = ReadPhysicalAdapterIds();
     private readonly Dictionary<string, PerformanceCounter> _diskActiveCounters = [];
     private readonly Dictionary<string, PerformanceCounter> _diskReadCounters = [];
@@ -20,6 +23,8 @@ internal sealed class PerformanceSampler : IDisposable
     private IReadOnlyList<PerformanceCounter>? _gpuDedicatedCounters;
     private IReadOnlyList<PerformanceCounter>? _gpuSharedCounters;
     private bool _gpuCountersInitialized;
+    private bool _compressedMemoryUnavailable;
+    private PerformanceCounter? _compressedMemoryCounter;
     private ProcessorPerformanceInformation[] _lastProcessorInfo = [];
     private ulong _lastIdle;
     private ulong _lastKernel;
@@ -46,6 +51,13 @@ internal sealed class PerformanceSampler : IDisposable
                 (ulong)info.CommitTotal * pageSize,
                 (ulong)info.CommitLimit * pageSize,
                 (ulong)info.SystemCache * pageSize,
+                new MemoryDetails(
+                    (ulong)info.KernelPaged * pageSize,
+                    (ulong)info.KernelNonpaged * pageSize,
+                    SampleCompressedMemory(pageSize, fastFirstPaint),
+                    _memorySpec.SpeedMtps,
+                    _memorySpec.SlotsUsed,
+                    _memorySpec.SlotsTotal),
                 info.ProcessCount,
                 info.ThreadCount,
                 info.HandleCount,
@@ -119,16 +131,17 @@ internal sealed class PerformanceSampler : IDisposable
         int index = 0;
         foreach (DriveInfo drive in DriveInfo.GetDrives().Where(drive => drive.IsReady))
         {
+            string driveName = drive.Name.TrimEnd('\\');
             long total = drive.TotalSize;
             long free = drive.AvailableFreeSpace;
             long used = total - free;
             disks.Add(new DiskPerformanceSample(
                 $"disk:{drive.Name}",
-                $"Disk {index} ({drive.Name.TrimEnd('\\')})",
+                $"Disk {index} ({driveName})",
                 drive.DriveFormat,
-                fastFirstPaint ? 0 : ReadCounter(_diskActiveCounters, "% Disk Time", index.ToString()),
-                fastFirstPaint ? 0 : ReadCounter(_diskReadCounters, "Disk Read Bytes/sec", index.ToString()),
-                fastFirstPaint ? 0 : ReadCounter(_diskWriteCounters, "Disk Write Bytes/sec", index.ToString()),
+                fastFirstPaint ? 0 : ReadCounter(_diskActiveCounters, "% Disk Time", driveName),
+                fastFirstPaint ? 0 : ReadCounter(_diskReadCounters, "Disk Read Bytes/sec", driveName),
+                fastFirstPaint ? 0 : ReadCounter(_diskWriteCounters, "Disk Write Bytes/sec", driveName),
                 used,
                 free,
                 total));
@@ -145,7 +158,7 @@ internal sealed class PerformanceSampler : IDisposable
         {
             if (!counters.TryGetValue(key, out PerformanceCounter? counter))
             {
-                counter = new PerformanceCounter("PhysicalDisk", counterName, instance, readOnly: true);
+                counter = new PerformanceCounter("LogicalDisk", counterName, instance, readOnly: true);
                 _ = counter.NextValue();
                 counters[key] = counter;
                 return 0;
@@ -214,15 +227,18 @@ internal sealed class PerformanceSampler : IDisposable
     private GpuPerformanceSample[] SampleGpus()
     {
         EnsureGpuCounters();
-        if (_gpuUtilCounters is null || _gpuUtilCounters.Count == 0)
+        double utilization = 0;
+        if (_gpuUtilCounters is not null)
         {
-            return [];
+            foreach (PerformanceCounter counter in _gpuUtilCounters)
+            {
+                utilization += ReadCounterValue(counter);
+            }
         }
 
-        double utilization = 0;
-        foreach (PerformanceCounter counter in _gpuUtilCounters)
+        if ((_gpuUtilCounters is null || _gpuUtilCounters.Count == 0) && _gpuInfo == GpuInfo.Unknown)
         {
-            utilization += ReadCounterValue(counter);
+            return [];
         }
 
         long dedicated = SumCounterBytes(_gpuDedicatedCounters);
@@ -231,12 +247,35 @@ internal sealed class PerformanceSampler : IDisposable
         [
             new GpuPerformanceSample(
                 "gpu:0",
-                "GPU 0",
-                "Windows GPU Engine counters",
+                _gpuInfo.Name,
+                _gpuUtilCounters is { Count: > 0 } ? "Windows GPU counters" : "Adapter info only",
                 Math.Clamp(utilization, 0, 100),
                 dedicated,
-                shared)
+                _gpuInfo.DedicatedMemoryTotalBytes,
+                shared,
+                null)
         ];
+    }
+
+    private ulong? SampleCompressedMemory(ulong pageSize, bool fastFirstPaint)
+    {
+        if (fastFirstPaint || _compressedMemoryUnavailable)
+        {
+            return null;
+        }
+
+        try
+        {
+            _compressedMemoryCounter ??= new PerformanceCounter("Memory", "Compressed Page Count", readOnly: true);
+            return (ulong)Math.Max(0, _compressedMemoryCounter.NextValue()) * pageSize;
+        }
+        catch
+        {
+            _compressedMemoryCounter?.Dispose();
+            _compressedMemoryCounter = null;
+            _compressedMemoryUnavailable = true;
+            return null;
+        }
     }
 
     private void EnsureGpuCounters()
@@ -417,6 +456,88 @@ internal sealed class PerformanceSampler : IDisposable
 
     private static string NormalizeAdapterId(string id) => id.Trim().Trim('{', '}');
 
+    private static GpuInfo ReadGpuInfo()
+    {
+        GpuInfo best = GpuInfo.Unknown;
+        try
+        {
+            using RegistryKey? root = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Video");
+            if (root is null)
+            {
+                return best;
+            }
+
+            foreach (string subKeyName in root.GetSubKeyNames())
+            {
+                try
+                {
+                    using RegistryKey? key = root.OpenSubKey($@"{subKeyName}\0000");
+                    string name = RegistryValueString(key?.GetValue("HardwareInformation.AdapterString"));
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        name = RegistryValueString(key?.GetValue("DriverDesc"));
+                    }
+
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        continue;
+                    }
+
+                    long total = Math.Max(
+                        RegistryValueInt64(key?.GetValue("HardwareInformation.qwMemorySize")),
+                        RegistryValueInt64(key?.GetValue("HardwareInformation.MemorySize")));
+                    GpuInfo candidate = new(name, total);
+                    if (best == GpuInfo.Unknown || candidate.DedicatedMemoryTotalBytes > best.DedicatedMemoryTotalBytes)
+                    {
+                        best = candidate;
+                    }
+                }
+                catch
+                {
+                    continue;
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return best;
+    }
+
+    private static string RegistryValueString(object? value)
+    {
+        string text = value switch
+        {
+            byte[] bytes => Encoding.Unicode.GetString(bytes),
+            string stringValue => stringValue,
+            _ => Convert.ToString(value) ?? ""
+        };
+        return text.Trim('\0', ' ', '\t', '\r', '\n');
+    }
+
+    private static long RegistryValueInt64(object? value)
+    {
+        switch (value)
+        {
+            case int number:
+                return number >= 0 ? number : unchecked((uint)number);
+            case uint number:
+                return number;
+            case long number:
+                return Math.Max(0, number);
+            case ulong number:
+                return number > long.MaxValue ? long.MaxValue : (long)number;
+            case byte[] bytes when bytes.Length >= 8:
+                long signed = BitConverter.ToInt64(bytes, 0);
+                return signed >= 0 ? signed : (long)Math.Min(BitConverter.ToUInt64(bytes, 0), (ulong)long.MaxValue);
+            case byte[] bytes when bytes.Length >= 4:
+                return BitConverter.ToUInt32(bytes, 0);
+        }
+
+        return long.TryParse(Convert.ToString(value), out long parsed) ? Math.Max(0, parsed) : 0;
+    }
+
     private static string IpAddress(NetworkInterface adapter)
     {
         try
@@ -483,6 +604,86 @@ internal sealed class PerformanceSampler : IDisposable
         return value is int mhz && mhz > 0 ? (uint)mhz : 0;
     }
 
+    private static MemorySpec ReadMemorySpec()
+    {
+        byte[] raw = NativeMethods.QueryRawSmbiosData();
+        if (raw.Length < 8)
+        {
+            return new MemorySpec(0, 0, 0);
+        }
+
+        int tableLength = (int)Math.Min(BitConverter.ToUInt32(raw, 4), raw.Length - 8);
+        int offset = 8;
+        int end = offset + tableLength;
+        int slots = 0;
+        int used = 0;
+        int speed = 0;
+
+        while (offset + 4 <= end)
+        {
+            byte type = raw[offset];
+            int length = raw[offset + 1];
+            if (length < 4 || offset + length > end)
+            {
+                break;
+            }
+
+            if (type == 17)
+            {
+                slots++;
+                if (MemoryDeviceSizeMb(raw, offset, length) > 0)
+                {
+                    used++;
+                    speed = Math.Max(speed, MemoryDeviceSpeedMtps(raw, offset, length));
+                }
+            }
+            else if (type == 127)
+            {
+                break;
+            }
+
+            int next = offset + length;
+            while (next + 1 < end && (raw[next] != 0 || raw[next + 1] != 0))
+            {
+                next++;
+            }
+
+            offset = next + 2;
+        }
+
+        return new MemorySpec(speed, used, slots);
+    }
+
+    private static ulong MemoryDeviceSizeMb(byte[] raw, int offset, int length)
+    {
+        ushort size = ReadUInt16(raw, offset, length, 0x0C);
+        if (size == 0 || size == 0xFFFF)
+        {
+            return 0;
+        }
+
+        if (size == 0x7FFF)
+        {
+            return ReadUInt32(raw, offset, length, 0x1C);
+        }
+
+        ulong value = (ulong)(size & 0x7FFF);
+        return (size & 0x8000) == 0 ? value : value / 1024;
+    }
+
+    private static int MemoryDeviceSpeedMtps(byte[] raw, int offset, int length)
+    {
+        ushort configured = ReadUInt16(raw, offset, length, 0x20);
+        ushort speed = ReadUInt16(raw, offset, length, 0x15);
+        return configured > 0 ? configured : speed;
+    }
+
+    private static ushort ReadUInt16(byte[] raw, int offset, int length, int fieldOffset) =>
+        fieldOffset + 2 <= length ? BitConverter.ToUInt16(raw, offset + fieldOffset) : (ushort)0;
+
+    private static uint ReadUInt32(byte[] raw, int offset, int length, int fieldOffset) =>
+        fieldOffset + 4 <= length ? BitConverter.ToUInt32(raw, offset + fieldOffset) : 0;
+
     public void Dispose()
     {
         foreach (PerformanceCounter counter in _diskActiveCounters.Values)
@@ -503,6 +704,7 @@ internal sealed class PerformanceSampler : IDisposable
         DisposeCounters(_gpuUtilCounters);
         DisposeCounters(_gpuDedicatedCounters);
         DisposeCounters(_gpuSharedCounters);
+        _compressedMemoryCounter?.Dispose();
     }
 
     private static void DisposeCounters(IReadOnlyList<PerformanceCounter>? counters)
@@ -516,5 +718,12 @@ internal sealed class PerformanceSampler : IDisposable
         {
             counter.Dispose();
         }
+    }
+
+    private sealed record MemorySpec(int SpeedMtps, int SlotsUsed, int SlotsTotal);
+
+    private sealed record GpuInfo(string Name, long DedicatedMemoryTotalBytes)
+    {
+        public static readonly GpuInfo Unknown = new("GPU 0", 0);
     }
 }

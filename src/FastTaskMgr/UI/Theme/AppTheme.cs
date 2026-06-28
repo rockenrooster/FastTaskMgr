@@ -20,11 +20,6 @@ internal static class AppTheme
         control.ForeColor = fore;
         control.BackColor = control is Button or TextBox or ComboBox or ListView ? panel : back;
 
-        if (control is ListView listView)
-        {
-            listView.OwnerDraw = false;
-        }
-
         foreach (Control child in control.Controls)
         {
             ApplyRecursive(child, back, panel, fore);

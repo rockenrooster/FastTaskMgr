@@ -12,7 +12,7 @@ Target: Windows 11 Task Manager behavior on Windows 11 x64. Status values track 
 | Process status | Partial | Process.Responding | Shows running/not responding; suspended detection is not complete. |
 | CPU percent | Done | Process CPU deltas | Computed over sample interval. |
 | Memory usage | Done | Process.WorkingSet64 | Access denied rows degrade gracefully. |
-| Disk throughput per process | Not possible yet | ETW candidate | Not implemented; exact Task Manager values likely require ETW. |
+| Disk throughput per process | Partial | GetProcessIoCounters | Sortable process I/O byte delta; exact Task Manager disk-only accounting likely requires ETW. |
 | Network throughput per process | Not possible yet | ETW candidate | Public low-overhead per-process accounting is limited. |
 | GPU usage per process | Not possible yet | PDH GPU Engine counters candidate | Not implemented; counter names vary by OS/GPU driver. |
 | Power usage | Not possible yet | Heuristic candidate | Not implemented; will only be shown as an approximation. |

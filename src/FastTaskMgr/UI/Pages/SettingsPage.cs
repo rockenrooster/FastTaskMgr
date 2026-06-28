@@ -338,7 +338,7 @@ internal sealed class SettingsPage : PageBase
         bool checking = State.Updates.IsChecking;
         bool downloading = State.Updates.IsDownloading;
         double progress = State.Updates.DownloadProgress;
-        _currentVersion.Text = State.Updates.CurrentVersion.ToString();
+        _currentVersion.Text = $"v{State.Updates.CurrentVersion}";
         _latestVersion.Text = checking ? "Checking..." : State.Updates.LastResult?.LatestVersionText ?? "Not checked";
         _checkUpdates.Enabled = !checking && !downloading;
         _downloadUpdate.Enabled = !checking && !downloading && State.Updates.LastResult?.CanDownload == true;

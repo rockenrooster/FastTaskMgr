@@ -30,6 +30,15 @@ internal sealed class DetailsPage : PageBase
             new("Path", 420, row => row.Path ?? "")
         ], row => row.ProcessId);
         _table.ContextMenuStrip = BuildContextMenu();
+        _table.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Delete && _table.SelectedRows.Count > 0)
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                EndSelected();
+            }
+        };
 
         Controls.Add(_table);
         Controls.Add(BuildToolbar());

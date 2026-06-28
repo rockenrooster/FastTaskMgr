@@ -7,6 +7,7 @@ internal sealed record ProcessRow(
     string Status,
     double CpuPercent,
     long WorkingSetBytes,
+    double DiskBytesPerSecond,
     int ThreadCount,
     int HandleCount,
     string? Path,

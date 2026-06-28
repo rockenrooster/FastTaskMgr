@@ -37,6 +37,7 @@ internal static partial class NativeMethods
     private const int ProcessorInformation = 11;
     private const int PfVirtFirmwareEnabled = 21;
     private const int SystemProcessorPerformanceInformation = 8;
+    private const uint RawSmbiosProvider = 0x52534D42;
 
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern SafeNativeHandle OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
@@ -55,6 +56,9 @@ internal static partial class NativeMethods
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetProcessAffinityMask(SafeNativeHandle hProcess, out UIntPtr lpProcessAffinityMask, out UIntPtr lpSystemAffinityMask);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetProcessIoCounters(SafeNativeHandle hProcess, out IoCounters lpIoCounters);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool IsWow64Process2(SafeNativeHandle hProcess, out ushort pProcessMachine, out ushort pNativeMachine);
@@ -117,6 +121,9 @@ internal static partial class NativeMethods
 
     [DllImport("psapi.dll", SetLastError = true)]
     public static extern bool GetPerformanceInfo(out PerformanceInformation performanceInformation, int size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetSystemFirmwareTable(uint firmwareTableProviderSignature, uint firmwareTableId, IntPtr firmwareTableBuffer, uint bufferSize);
 
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern SafeServiceHandle OpenSCManager(string? lpMachineName, string? lpDatabaseName, uint dwDesiredAccess);
@@ -307,6 +314,14 @@ internal static partial class NativeMethods
         return $"0x{processMask.ToUInt64():X}";
     }
 
+    public static ulong QueryProcessIoBytes(int pid)
+    {
+        using SafeNativeHandle process = OpenProcess(ProcessQueryLimitedInformation, false, pid);
+        return !process.IsInvalid && GetProcessIoCounters(process, out IoCounters counters)
+            ? counters.ReadTransferCount + counters.WriteTransferCount
+            : 0;
+    }
+
     public static ProcessorPerformanceInformation[] QueryProcessorPerformance()
     {
         int size = Marshal.SizeOf<ProcessorPerformanceInformation>();
@@ -423,6 +438,33 @@ internal static partial class NativeMethods
     }
 
     public static bool IsVirtualizationFirmwareEnabled() => IsProcessorFeaturePresent(PfVirtFirmwareEnabled);
+
+    public static byte[] QueryRawSmbiosData()
+    {
+        uint size = GetSystemFirmwareTable(RawSmbiosProvider, 0, IntPtr.Zero, 0);
+        if (size == 0 || size > int.MaxValue)
+        {
+            return [];
+        }
+
+        IntPtr buffer = Marshal.AllocHGlobal((int)size);
+        try
+        {
+            uint written = GetSystemFirmwareTable(RawSmbiosProvider, 0, buffer, size);
+            if (written == 0 || written > size)
+            {
+                return [];
+            }
+
+            byte[] data = new byte[written];
+            Marshal.Copy(buffer, data, 0, data.Length);
+            return data;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -545,6 +587,17 @@ internal struct ProcessBasicInformation
     public IntPtr Reserved2B;
     public IntPtr UniqueProcessId;
     public IntPtr InheritedFromUniqueProcessId;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct IoCounters
+{
+    public ulong ReadOperationCount;
+    public ulong WriteOperationCount;
+    public ulong OtherOperationCount;
+    public ulong ReadTransferCount;
+    public ulong WriteTransferCount;
+    public ulong OtherTransferCount;
 }
 
 internal enum TokenInformationClass

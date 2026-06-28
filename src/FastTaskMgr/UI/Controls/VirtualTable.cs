@@ -3,11 +3,14 @@ namespace FastTaskMgr.UI.Controls;
 internal sealed class VirtualTable<T> : ListView
     where T : class
 {
+    private static readonly Color LightHoverBackColor = Color.FromArgb(226, 238, 252);
+    private static readonly Color DarkHoverBackColor = Color.FromArgb(56, 64, 76);
     private readonly IReadOnlyList<TableColumn<T>> _columns;
     private readonly Func<T, object?> _keySelector;
     private IReadOnlyList<T> _rows = [];
     private int _sortColumn;
     private bool _sortDescending;
+    private int _hotIndex = -1;
 
     public VirtualTable(IReadOnlyList<TableColumn<T>> columns, Func<T, object?>? keySelector = null)
     {
@@ -18,6 +21,8 @@ internal sealed class VirtualTable<T> : ListView
         GridLines = true;
         HideSelection = false;
         MultiSelect = true;
+        OwnerDraw = true;
+        UseCompatibleStateImageBehavior = false;
         View = View.Details;
         VirtualMode = true;
         DoubleBuffered = true;
@@ -95,6 +100,39 @@ internal sealed class VirtualTable<T> : ListView
         e.Item = new ListViewItem(subItems);
     }
 
+    protected override void OnDrawColumnHeader(DrawListViewColumnHeaderEventArgs e)
+    {
+        e.DrawDefault = true;
+        base.OnDrawColumnHeader(e);
+    }
+
+    protected override void OnDrawItem(DrawListViewItemEventArgs e)
+    {
+        base.OnDrawItem(e);
+    }
+
+    protected override void OnDrawSubItem(DrawListViewSubItemEventArgs e)
+    {
+        bool selected = e.Item?.Selected == true;
+        Color hoverBackColor = BackColor.GetBrightness() < 0.5f ? DarkHoverBackColor : LightHoverBackColor;
+        Color backColor = selected ? SystemColors.Highlight : e.ItemIndex == _hotIndex ? hoverBackColor : BackColor;
+        Color textColor = selected ? SystemColors.HighlightText : ForeColor;
+        using SolidBrush background = new(backColor);
+        e.Graphics.FillRectangle(background, e.Bounds);
+        Rectangle textBounds = new(e.Bounds.Left + 4, e.Bounds.Top, Math.Max(0, e.Bounds.Width - 8), e.Bounds.Height);
+        TextRenderer.DrawText(
+            e.Graphics,
+            e.SubItem?.Text ?? "",
+            Font,
+            textBounds,
+            textColor,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        using Pen grid = new(SystemColors.ControlLight);
+        e.Graphics.DrawLine(grid, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
+        e.Graphics.DrawLine(grid, e.Bounds.Right - 1, e.Bounds.Top, e.Bounds.Right - 1, e.Bounds.Bottom);
+        base.OnDrawSubItem(e);
+    }
+
     protected override void OnColumnClick(ColumnClickEventArgs e)
     {
         if (_sortColumn == e.Column)
@@ -125,6 +163,38 @@ internal sealed class VirtualTable<T> : ListView
         }
 
         base.OnMouseDown(e);
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        int next = HitTest(e.Location).Item?.Index ?? -1;
+        if (next != _hotIndex)
+        {
+            InvalidateRow(_hotIndex);
+            _hotIndex = next;
+            InvalidateRow(_hotIndex);
+        }
+
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        if (_hotIndex != -1)
+        {
+            InvalidateRow(_hotIndex);
+            _hotIndex = -1;
+        }
+
+        base.OnMouseLeave(e);
+    }
+
+    private void InvalidateRow(int index)
+    {
+        if (index >= 0 && index < VirtualListSize)
+        {
+            Invalidate(GetItemRect(index));
+        }
     }
 
     private void UpdateColumnHeaders()

@@ -231,7 +231,7 @@ internal sealed class PerformancePage : PageBase
             items.AddRange(sample.Gpus.Select(gpu => new PerfItem(
                 gpu.Key,
                 gpu.Name,
-                $"{gpu.UtilizationPercent:0}%  Dedicated {FormatUtil.Bytes(gpu.DedicatedMemoryBytes)}",
+                $"{gpu.UtilizationPercent:0}%  {GpuMemoryText(gpu)}",
                 gpu.UtilizationPercent,
                 GpuColor)));
         }
@@ -389,12 +389,19 @@ internal sealed class PerformancePage : PageBase
 
         if (item.Key == "memory")
         {
+            MemoryDetails details = _latest.MemoryDetails;
             return
             [
                 new("In use", FormatUtil.Bytes(_latest.TotalMemoryBytes - _latest.AvailableMemoryBytes)),
                 new("Available", FormatUtil.Bytes(_latest.AvailableMemoryBytes)),
                 new("Committed", $"{FormatUtil.Bytes(_latest.CommitTotalBytes)} / {FormatUtil.Bytes(_latest.CommitLimitBytes)}"),
-                new("Cached", FormatUtil.Bytes(_latest.SystemCacheBytes))
+                new("Cached", FormatUtil.Bytes(_latest.SystemCacheBytes)),
+                new("Paged pool", FormatUtil.Bytes(details.PagedPoolBytes)),
+                new("Non-paged pool", FormatUtil.Bytes(details.NonPagedPoolBytes)),
+                new("Compressed", details.CompressedBytes is null ? "Unavailable" : FormatUtil.Bytes(details.CompressedBytes.Value)),
+                new("Speed", details.SpeedMtps == 0 ? "Unknown" : $"{details.SpeedMtps} MT/s"),
+                new("Slots used", details.SlotsTotal == 0 ? "Unknown" : $"{details.SlotsUsed} of {details.SlotsTotal}"),
+                new("Bandwidth R/W", "Unavailable")
             ];
         }
 
@@ -432,9 +439,11 @@ internal sealed class PerformancePage : PageBase
         {
             return
             [
+                new("Model", gpu.Name),
                 new("Utilization", $"{gpu.UtilizationPercent:0}%"),
-                new("Dedicated memory", FormatUtil.Bytes(gpu.DedicatedMemoryBytes)),
+                new("Dedicated memory", GpuMemoryText(gpu)),
                 new("Shared memory", FormatUtil.Bytes(gpu.SharedMemoryBytes)),
+                new("Temperature", gpu.TemperatureCelsius is null ? "Unavailable" : $"{gpu.TemperatureCelsius.Value:0} C"),
                 new("Counters", gpu.Description)
             ];
         }
@@ -546,6 +555,11 @@ internal sealed class PerformancePage : PageBase
         return $"{ip}  {FormatUtil.BitsPerSecond(network.LinkSpeedBitsPerSecond)}";
     }
 
+    private static string GpuMemoryText(GpuPerformanceSample gpu) =>
+        gpu.DedicatedMemoryTotalBytes > 0
+            ? $"{FormatUtil.Bytes(gpu.DedicatedMemoryBytes)} / {FormatUtil.Bytes(gpu.DedicatedMemoryTotalBytes)}"
+            : FormatUtil.Bytes(gpu.DedicatedMemoryBytes);
+
     private void ResizeSidebarTiles()
     {
         int width = SidebarTileWidth();
@@ -575,11 +589,16 @@ internal sealed class PerformancePage : PageBase
 
     private sealed class PerfTile : UserControl
     {
+        private static readonly Color SelectedBackColor = Color.FromArgb(235, 235, 235);
+        private static readonly Color HoverBackColor = Color.FromArgb(245, 248, 252);
         private readonly Action<string> _select;
         private readonly GraphControl _graph = new() { Compact = true };
         private readonly Label _title = new();
         private readonly Label _subtitle = new();
         private PerfItem? _item;
+        private Color _pageBackColor;
+        private bool _selected;
+        private bool _hovered;
 
         public PerfTile(Action<string> select)
         {
@@ -604,16 +623,15 @@ internal sealed class PerformancePage : PageBase
         public void Update(PerfItem item, IReadOnlyList<double> samples, bool selected, int width, Color pageBackColor)
         {
             _item = item;
+            _selected = selected;
+            _pageBackColor = pageBackColor;
             Width = width;
-            BackColor = selected ? Color.FromArgb(235, 235, 235) : pageBackColor;
-            _title.BackColor = BackColor;
-            _subtitle.BackColor = BackColor;
-            _graph.BackColor = BackColor;
             _graph.LineColor = item.Color;
             _graph.FillColor = Color.FromArgb(48, item.Color);
             _graph.SetSamples(samples);
             _title.Text = item.Title;
             _subtitle.Text = item.Subtitle;
+            ApplyBackColor();
             ResizeTo(width);
         }
 
@@ -637,11 +655,29 @@ internal sealed class PerformancePage : PageBase
                     _select(_item.Key);
                 }
             };
+            control.MouseEnter += (_, _) =>
+            {
+                _hovered = true;
+                ApplyBackColor();
+            };
+            control.MouseLeave += (_, _) =>
+            {
+                _hovered = ClientRectangle.Contains(PointToClient(Cursor.Position));
+                ApplyBackColor();
+            };
 
             foreach (Control child in control.Controls)
             {
                 WireClick(child);
             }
+        }
+
+        private void ApplyBackColor()
+        {
+            BackColor = _selected ? SelectedBackColor : _hovered ? HoverBackColor : _pageBackColor;
+            _title.BackColor = BackColor;
+            _subtitle.BackColor = BackColor;
+            _graph.BackColor = BackColor;
         }
     }
 

@@ -10,6 +10,7 @@ internal sealed record PerformanceSample(
     ulong CommitTotalBytes,
     ulong CommitLimitBytes,
     ulong SystemCacheBytes,
+    MemoryDetails MemoryDetails,
     int ProcessCount,
     int ThreadCount,
     int HandleCount,
@@ -17,6 +18,14 @@ internal sealed record PerformanceSample(
     IReadOnlyList<DiskPerformanceSample> Disks,
     IReadOnlyList<NetworkPerformanceSample> Networks,
     IReadOnlyList<GpuPerformanceSample> Gpus);
+
+internal sealed record MemoryDetails(
+    ulong PagedPoolBytes,
+    ulong NonPagedPoolBytes,
+    ulong? CompressedBytes,
+    int SpeedMtps,
+    int SlotsUsed,
+    int SlotsTotal);
 
 internal sealed record DiskPerformanceSample(
     string Key,
@@ -45,4 +54,6 @@ internal sealed record GpuPerformanceSample(
     string Description,
     double UtilizationPercent,
     long DedicatedMemoryBytes,
-    long SharedMemoryBytes);
+    long DedicatedMemoryTotalBytes,
+    long SharedMemoryBytes,
+    double? TemperatureCelsius);

@@ -23,7 +23,7 @@ function Get-InnoCompiler {
         return $candidate
     }
 
-    throw "Inno Setup 6 is required to build FastTaskMgr-Setup.exe."
+    return $null
 }
 
 $csprojPath = Join-Path $PSScriptRoot "src\FastTaskMgr\FastTaskMgr.csproj"
@@ -79,12 +79,21 @@ $hash = (Get-FileHash $artifactExe -Algorithm SHA256).Hash.ToLowerInvariant()
 "$hash  FastTaskMgr.exe" | Set-Content $artifactSha
 
 $iscc = Get-InnoCompiler
-& $iscc "/DAppVersion=$newVersion" "/DSourceDir=$publishDir" "/DOutputDir=$artifactDir" $innoScript
-if ($LASTEXITCODE -ne 0) {
-    throw "ISCC failed"
-}
+if ($iscc) {
+    & $iscc "/DAppVersion=$newVersion" "/DSourceDir=$publishDir" "/DOutputDir=$artifactDir" $innoScript
+    if ($LASTEXITCODE -ne 0) {
+        throw "ISCC failed"
+    }
 
-$setupHash = (Get-FileHash $setupArtifact -Algorithm SHA256).Hash.ToLowerInvariant()
-"$setupHash  FastTaskMgr-Setup.exe" | Set-Content $setupSha
+    $setupHash = (Get-FileHash $setupArtifact -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$setupHash  FastTaskMgr-Setup.exe" | Set-Content $setupSha
+}
+elseif ($env:GITHUB_ACTIONS -eq "true") {
+    throw "Inno Setup 6 is required to build FastTaskMgr-Setup.exe."
+}
+else {
+    Write-Warning "Inno Setup 6 not found; skipped FastTaskMgr-Setup.exe."
+    Remove-Item $setupArtifact, $setupSha -Force -ErrorAction SilentlyContinue
+}
 
 Write-Host "Published $artifactExe ($newVersion)" -ForegroundColor Green

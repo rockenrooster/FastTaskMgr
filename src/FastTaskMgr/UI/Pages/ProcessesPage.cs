@@ -21,11 +21,21 @@ internal sealed class ProcessesPage : PageBase
             new("Status", 120, row => row.Status),
             new("CPU", 78, row => FormatUtil.Percent(row.CpuPercent), row => row.CpuPercent),
             new("Memory", 105, row => FormatUtil.Bytes(row.WorkingSetBytes), row => row.WorkingSetBytes),
+            new("Disk", 96, row => $"{FormatUtil.Bytes((long)row.DiskBytesPerSecond)}/s", row => row.DiskBytesPerSecond),
             new("Threads", 78, row => row.ThreadCount.ToString(), row => row.ThreadCount),
             new("Handles", 82, row => row.HandleCount.ToString(), row => row.HandleCount),
             new("Path", 420, row => row.Path ?? "")
         ], row => row.ProcessId);
         _table.ContextMenuStrip = BuildContextMenu();
+        _table.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Delete && _table.SelectedRows.Count > 0)
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                EndSelected();
+            }
+        };
 
         Controls.Add(_table);
         Controls.Add(BuildToolbar());
