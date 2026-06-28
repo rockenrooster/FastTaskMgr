@@ -43,6 +43,8 @@ jobs:
 
       - name: Build artifact
         shell: pwsh
+        env:
+          FASTTASKMGR_UPDATE_SIGNING_PRIVATE_KEY_PEM: ${{ secrets.FASTTASKMGR_UPDATE_SIGNING_PRIVATE_KEY_PEM }}
         run: .\build.ps1 -Version $env:VERSION -NoIncrement
 
       - name: Create or update GitHub release
@@ -52,8 +54,8 @@ jobs:
         run: |
           gh release view $env:TAG *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:TAG artifacts\FastTaskMgr.exe artifacts\FastTaskMgr.exe.sha256 artifacts\FastTaskMgr-Setup.exe artifacts\FastTaskMgr-Setup.exe.sha256 --clobber
+            gh release upload $env:TAG artifacts\FastTaskMgr.exe artifacts\FastTaskMgr.exe.sha256 artifacts\FastTaskMgr-Setup.exe artifacts\FastTaskMgr-Setup.exe.sha256 artifacts\FastTaskMgr-Setup.exe.manifest.json artifacts\FastTaskMgr-Setup.exe.manifest.sig --clobber
           }
           else {
-            gh release create $env:TAG artifacts\FastTaskMgr.exe artifacts\FastTaskMgr.exe.sha256 artifacts\FastTaskMgr-Setup.exe artifacts\FastTaskMgr-Setup.exe.sha256 --verify-tag --title $env:TAG --notes "FastTaskMgr $env:TAG"
+            gh release create $env:TAG artifacts\FastTaskMgr.exe artifacts\FastTaskMgr.exe.sha256 artifacts\FastTaskMgr-Setup.exe artifacts\FastTaskMgr-Setup.exe.sha256 artifacts\FastTaskMgr-Setup.exe.manifest.json artifacts\FastTaskMgr-Setup.exe.manifest.sig --verify-tag --title $env:TAG --notes "FastTaskMgr $env:TAG"
           }

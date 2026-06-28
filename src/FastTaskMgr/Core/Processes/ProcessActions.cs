@@ -20,14 +20,16 @@ internal static class ProcessActions
 
     public static bool EndProcess(ProcessRow row) => NativeMethods.TerminateProcessById(row.ProcessId);
 
-    public static void RestartExplorer(ProcessRow row)
+    public static void RestartExplorer()
     {
-        if (!row.Name.Equals("explorer", StringComparison.OrdinalIgnoreCase))
+        foreach (Process process in Process.GetProcessesByName("explorer"))
         {
-            return;
+            using (process)
+            {
+                _ = NativeMethods.TerminateProcessById(process.Id);
+            }
         }
 
-        _ = EndProcess(row);
         Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true });
     }
 

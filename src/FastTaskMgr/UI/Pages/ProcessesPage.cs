@@ -189,14 +189,7 @@ internal sealed class ProcessesPage : PageBase
 
     private void RestartExplorer()
     {
-        ProcessRow? row = _table.SelectedRow;
-        if (row is null || !row.Name.Equals("explorer", StringComparison.OrdinalIgnoreCase))
-        {
-            MessageBox.Show(this, "Select explorer.exe first.", "Restart Explorer", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
-        RunAction(() => ProcessActions.RestartExplorer(row), "Restart Explorer");
+        RunAction(ProcessActions.RestartExplorer, "Restart Explorer");
     }
 
     private void WithSelected(Action<ProcessRow> action, string title)

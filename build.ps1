@@ -26,6 +26,59 @@ function Get-InnoCompiler {
     return $null
 }
 
+function Write-SignedUpdateManifest {
+    param(
+        [string]$Version,
+        [string]$SetupPath,
+        [string]$ManifestPath,
+        [string]$SignaturePath
+    )
+
+    $setupItem = Get-Item $SetupPath
+    $setupHash = (Get-FileHash $SetupPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $manifestJson = [ordered]@{
+        schemaVersion = 1
+        version = $Version
+        tag = "v$Version"
+        assetName = "FastTaskMgr-Setup.exe"
+        downloadUrl = "https://github.com/rockenrooster/FastTaskMgr/releases/download/v$Version/FastTaskMgr-Setup.exe"
+        sha256 = $setupHash
+        sizeBytes = $setupItem.Length
+        createdUtc = (Get-Date).ToUniversalTime().ToString("o")
+    } | ConvertTo-Json -Compress
+
+    [System.IO.File]::WriteAllText($ManifestPath, $manifestJson, [System.Text.UTF8Encoding]::new($false))
+
+    $privateKey = $env:FASTTASKMGR_UPDATE_SIGNING_PRIVATE_KEY_PEM
+    if ([string]::IsNullOrWhiteSpace($privateKey) -and $env:FASTTASKMGR_UPDATE_SIGNING_PRIVATE_KEY_PEM_FILE) {
+        $privateKey = Get-Content $env:FASTTASKMGR_UPDATE_SIGNING_PRIVATE_KEY_PEM_FILE -Raw
+    }
+
+    if ([string]::IsNullOrWhiteSpace($privateKey)) {
+        Remove-Item $ManifestPath, $SignaturePath -Force -ErrorAction SilentlyContinue
+        if ($env:GITHUB_ACTIONS -eq "true") {
+            throw "FASTTASKMGR_UPDATE_SIGNING_PRIVATE_KEY_PEM is required to sign update manifests."
+        }
+
+        Write-Warning "FASTTASKMGR_UPDATE_SIGNING_PRIVATE_KEY_PEM is not set; skipped signed update manifest."
+        return
+    }
+
+    $rsa = [System.Security.Cryptography.RSA]::Create()
+    try {
+        $rsa.ImportFromPem($privateKey)
+        $manifestBytes = [System.IO.File]::ReadAllBytes($ManifestPath)
+        $signature = $rsa.SignData(
+            $manifestBytes,
+            [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+            [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        [System.IO.File]::WriteAllBytes($SignaturePath, $signature)
+    }
+    finally {
+        $rsa.Dispose()
+    }
+}
+
 $csprojPath = Join-Path $PSScriptRoot "src\FastTaskMgr\FastTaskMgr.csproj"
 $innoScript = Join-Path $PSScriptRoot "installer\FastTaskMgr.iss"
 $content = Get-Content $csprojPath -Raw
@@ -64,10 +117,13 @@ $artifactExe = Join-Path $artifactDir "FastTaskMgr.exe"
 $artifactSha = Join-Path $artifactDir "FastTaskMgr.exe.sha256"
 $setupArtifact = Join-Path $artifactDir "FastTaskMgr-Setup.exe"
 $setupSha = Join-Path $artifactDir "FastTaskMgr-Setup.exe.sha256"
+$setupManifest = Join-Path $artifactDir "FastTaskMgr-Setup.exe.manifest.json"
+$setupManifestSig = Join-Path $artifactDir "FastTaskMgr-Setup.exe.manifest.sig"
 
 New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
 Remove-Item (Join-Path $artifactDir "FastTaskMgr-Setup.ps1") -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $artifactDir "FastTaskMgr-Setup.ps1.sha256") -Force -ErrorAction SilentlyContinue
+Remove-Item $setupManifest, $setupManifestSig -Force -ErrorAction SilentlyContinue
 try {
     Copy-Item $publishExe $artifactExe -Force -ErrorAction Stop
 }
@@ -87,13 +143,14 @@ if ($iscc) {
 
     $setupHash = (Get-FileHash $setupArtifact -Algorithm SHA256).Hash.ToLowerInvariant()
     "$setupHash  FastTaskMgr-Setup.exe" | Set-Content $setupSha
+    Write-SignedUpdateManifest -Version $newVersion -SetupPath $setupArtifact -ManifestPath $setupManifest -SignaturePath $setupManifestSig
 }
 elseif ($env:GITHUB_ACTIONS -eq "true") {
     throw "Inno Setup 6 is required to build FastTaskMgr-Setup.exe."
 }
 else {
     Write-Warning "Inno Setup 6 not found; skipped FastTaskMgr-Setup.exe."
-    Remove-Item $setupArtifact, $setupSha -Force -ErrorAction SilentlyContinue
+    Remove-Item $setupArtifact, $setupSha, $setupManifest, $setupManifestSig -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "Published $artifactExe ($newVersion)" -ForegroundColor Green
