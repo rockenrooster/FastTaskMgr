@@ -139,7 +139,7 @@ internal sealed class PerformanceSampler : IDisposable
                 $"disk:{drive.Name}",
                 $"Disk {index} ({driveName})",
                 drive.DriveFormat,
-                fastFirstPaint ? 0 : ReadCounter(_diskActiveCounters, "% Disk Time", driveName),
+                fastFirstPaint ? 0 : Math.Clamp(ReadCounter(_diskActiveCounters, "% Disk Time", driveName), 0, 100),
                 fastFirstPaint ? 0 : ReadCounter(_diskReadCounters, "Disk Read Bytes/sec", driveName),
                 fastFirstPaint ? 0 : ReadCounter(_diskWriteCounters, "Disk Write Bytes/sec", driveName),
                 used,
