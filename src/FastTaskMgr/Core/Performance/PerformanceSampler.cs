@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Diagnostics;
@@ -14,7 +15,6 @@ internal sealed class PerformanceSampler : IDisposable
     private readonly CpuInfo _cpuInfo = ReadCpuInfo();
     private readonly MemorySpec _memorySpec = ReadMemorySpec();
     private readonly GpuInfo _gpuInfo = ReadGpuInfo();
-    private readonly HashSet<string> _physicalAdapterIds = ReadPhysicalAdapterIds();
     private readonly Dictionary<string, PerformanceCounter> _diskActiveCounters = [];
     private readonly Dictionary<string, PerformanceCounter> _diskReadCounters = [];
     private readonly Dictionary<string, PerformanceCounter> _diskWriteCounters = [];
@@ -178,7 +178,8 @@ internal sealed class PerformanceSampler : IDisposable
         List<NetworkPerformanceSample> networks = [];
         foreach (NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces())
         {
-            if (!IsPhysicalNic(adapter, _physicalAdapterIds))
+            string ipAddress = IpAddress(adapter);
+            if (!IsVisibleNetworkAdapter(adapter, ipAddress))
             {
                 continue;
             }
@@ -214,7 +215,7 @@ internal sealed class PerformanceSampler : IDisposable
                 key,
                 adapter.NetworkInterfaceType == NetworkInterfaceType.Wireless80211 ? "Wi-Fi" : "Ethernet",
                 adapter.Name,
-                IpAddress(adapter),
+                ipAddress,
                 adapter.Speed,
                 send,
                 receive,
@@ -369,14 +370,14 @@ internal sealed class PerformanceSampler : IDisposable
         return (long)Math.Min(long.MaxValue, Math.Max(0, total));
     }
 
-    private static bool IsPhysicalNic(NetworkInterface adapter, HashSet<string> physicalAdapterIds)
+    private static bool IsVisibleNetworkAdapter(NetworkInterface adapter, string ipAddress)
     {
         if (adapter.OperationalStatus != OperationalStatus.Up)
         {
             return false;
         }
 
-        if (!physicalAdapterIds.Contains(NormalizeAdapterId(adapter.Id)))
+        if (string.IsNullOrWhiteSpace(ipAddress))
         {
             return false;
         }
@@ -392,9 +393,8 @@ internal sealed class PerformanceSampler : IDisposable
         }
 
         string text = (adapter.Name + " " + adapter.Description).ToLowerInvariant();
-        string[] virtualHints =
+        string[] hiddenHints =
         [
-            "virtual",
             "vpn",
             "tap",
             "tunnel",
@@ -402,59 +402,13 @@ internal sealed class PerformanceSampler : IDisposable
             "wireguard",
             "tailscale",
             "zerotier",
-            "hyper-v",
-            "vmware",
-            "virtualbox",
             "docker",
-            "bluetooth"
+            "bluetooth",
+            "loopback"
         ];
 
-        return !virtualHints.Any(text.Contains);
+        return !hiddenHints.Any(text.Contains);
     }
-
-    private static HashSet<string> ReadPhysicalAdapterIds()
-    {
-        HashSet<string> ids = new(StringComparer.OrdinalIgnoreCase);
-        using RegistryKey? root = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}");
-        if (root is null)
-        {
-            return ids;
-        }
-
-        foreach (string subKeyName in root.GetSubKeyNames())
-        {
-            try
-            {
-                using RegistryKey? key = root.OpenSubKey(subKeyName);
-                string? id = Convert.ToString(key?.GetValue("NetCfgInstanceId"));
-                string? componentId = Convert.ToString(key?.GetValue("ComponentId"));
-                int physicalMedia = Convert.ToInt32(key?.GetValue("*PhysicalMediaType") ?? 0);
-                if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(componentId) || physicalMedia == 0)
-                {
-                    continue;
-                }
-
-                string component = componentId.ToLowerInvariant();
-                if (component.StartsWith("ms_", StringComparison.Ordinal)
-                    || component.StartsWith("vms_", StringComparison.Ordinal)
-                    || component.StartsWith("root\\", StringComparison.Ordinal)
-                    || component.StartsWith("sw\\", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                ids.Add(NormalizeAdapterId(id));
-            }
-            catch
-            {
-                continue;
-            }
-        }
-
-        return ids;
-    }
-
-    private static string NormalizeAdapterId(string id) => id.Trim().Trim('{', '}');
 
     private static GpuInfo ReadGpuInfo()
     {
@@ -543,7 +497,7 @@ internal sealed class PerformanceSampler : IDisposable
         try
         {
             return adapter.GetIPProperties().UnicastAddresses
-                .Where(address => address.Address.AddressFamily == AddressFamily.InterNetwork)
+                .Where(address => address.Address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(address.Address))
                 .Select(address => address.Address.ToString())
                 .FirstOrDefault() ?? "";
         }
