@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace FastTaskMgr.UI.Controls;
 
 internal sealed class VirtualTable<T> : ListView
@@ -47,6 +49,7 @@ internal sealed class VirtualTable<T> : ListView
 
     public void SetRows(IEnumerable<T> rows)
     {
+        int horizontalScroll = HorizontalScrollPosition();
         BeginUpdate();
         try
         {
@@ -85,6 +88,7 @@ internal sealed class VirtualTable<T> : ListView
         finally
         {
             EndUpdate();
+            RestoreHorizontalScroll(horizontalScroll);
         }
     }
 
@@ -142,7 +146,7 @@ internal sealed class VirtualTable<T> : ListView
         else
         {
             _sortColumn = e.Column;
-            _sortDescending = false;
+            _sortDescending = StartsDescending(_columns[e.Column].Title);
         }
 
         SetRows(_rows);
@@ -206,6 +210,30 @@ internal sealed class VirtualTable<T> : ListView
         }
     }
 
+    private int HorizontalScrollPosition() => IsHandleCreated ? ListViewNative.GetScrollPos(Handle, ListViewNative.SbHorz) : 0;
+
+    private void RestoreHorizontalScroll(int position)
+    {
+        if (!IsHandleCreated || position <= 0)
+        {
+            return;
+        }
+
+        int current = ListViewNative.GetScrollPos(Handle, ListViewNative.SbHorz);
+        int delta = position - current;
+        if (delta != 0)
+        {
+            _ = ListViewNative.SendMessage(Handle, ListViewNative.LvmScroll, (IntPtr)delta, IntPtr.Zero);
+        }
+    }
+
+    private static bool StartsDescending(string title) =>
+        title.Equals("CPU", StringComparison.OrdinalIgnoreCase)
+        || title.Equals("Memory", StringComparison.OrdinalIgnoreCase)
+        || title.Equals("Disk", StringComparison.OrdinalIgnoreCase)
+        || title.Equals("Threads", StringComparison.OrdinalIgnoreCase)
+        || title.Equals("Handles", StringComparison.OrdinalIgnoreCase);
+
     private static int CompareNullable(IComparable? left, IComparable? right)
     {
         if (ReferenceEquals(left, right))
@@ -230,4 +258,16 @@ internal sealed class VirtualTable<T> : ListView
 
         return left.CompareTo(right);
     }
+}
+
+file static class ListViewNative
+{
+    public const int SbHorz = 0;
+    public const int LvmScroll = 0x1014;
+
+    [DllImport("user32.dll")]
+    public static extern int GetScrollPos(IntPtr hWnd, int nBar);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 }
