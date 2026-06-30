@@ -8,6 +8,7 @@ namespace FastTaskMgr.UI.Pages;
 internal sealed class SettingsPage : PageBase
 {
     private const string TaskManagerIfeoKey = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe";
+    private const string AppPathsKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\FastTaskMgr.exe";
     private readonly ComboBox _defaultPage = new();
     private readonly ComboBox _updateSpeed = new();
     private readonly ComboBox _theme = new();
@@ -18,6 +19,11 @@ internal sealed class SettingsPage : PageBase
     private readonly CheckBox _replaceTaskManager = new() { Text = "Use FastTaskMgr for Task Manager shortcuts", AutoSize = true };
     private readonly CheckBox _confirmEnd = new() { Text = "Confirm before ending process", AutoSize = true };
     private readonly CheckBox _confirmEfficiency = new() { Text = "Confirm before efficiency mode", AutoSize = true };
+    private readonly Label _installState = new();
+    private readonly Label _installPath = new();
+    private readonly Label _installStatus = new();
+    private readonly LoadingSpinner _installSpinner = new();
+    private readonly Button _installApp = new() { Text = "Install FastTaskMgr", AutoSize = true, Height = 32, Enabled = false };
     private readonly Label _currentVersion = new();
     private readonly Label _latestVersion = new();
     private readonly Label _updateStatus = new();
@@ -63,6 +69,9 @@ internal sealed class SettingsPage : PageBase
         AddCheckRow(integration, _alwaysStartAsAdmin);
         AddCheckRow(integration, _replaceTaskManager);
 
+        TableLayoutPanel installation = AddSection(root, "Installation");
+        AddWideRow(installation, BuildInstallPanel());
+
         TableLayoutPanel updates = AddSection(root, "Updates");
         AddWideRow(updates, BuildUpdatePanel());
 
@@ -79,6 +88,7 @@ internal sealed class SettingsPage : PageBase
 
         _save.Click += (_, _) => Save();
         _saveStatusTimer.Tick += (_, _) => ClearSaveStatus();
+        _installApp.Click += async (_, _) => await InstallAppAsync();
         _checkUpdates.Click += async (_, _) => await CheckForUpdatesAsync();
         _downloadUpdate.Click += async (_, _) => await DownloadUpdateAsync();
         State.Updates.StatusChanged += (_, _) => RefreshUpdateUi();
@@ -100,6 +110,7 @@ internal sealed class SettingsPage : PageBase
         _confirmEnd.Checked = State.Settings.ConfirmBeforeEndProcess;
         _confirmEfficiency.Checked = State.Settings.ConfirmBeforeEfficiencyMode;
         ClearSaveStatus();
+        RefreshInstallUi();
         RefreshUpdateUi();
         if (State.Updates.LastResult is null && !State.Updates.IsChecking)
         {
@@ -147,6 +158,41 @@ internal sealed class SettingsPage : PageBase
         {
             control.Width = width;
         }
+    }
+
+    private Control BuildInstallPanel()
+    {
+        TableLayoutPanel panel = new()
+        {
+            AutoSize = true,
+            ColumnCount = 2,
+            Margin = new Padding(0, 2, 0, 2)
+        };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420));
+
+        ConfigureValueLabel(_installState);
+        ConfigureValueLabel(_installPath);
+        ConfigureValueLabel(_installStatus);
+        _installPath.MaximumSize = new Size(420, 0);
+        _installStatus.MaximumSize = new Size(420, 0);
+
+        FlowLayoutPanel actions = new()
+        {
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Margin = new Padding(0)
+        };
+        _installSpinner.Margin = new Padding(8, 6, 4, 0);
+        actions.Controls.Add(_installApp);
+        actions.Controls.Add(_installSpinner);
+
+        AddUpdateRow(panel, "State", _installState);
+        AddUpdateRow(panel, "Path", _installPath);
+        AddUpdateRow(panel, "Status", _installStatus);
+        AddUpdateRow(panel, "", actions);
+        return panel;
     }
 
     private Control BuildUpdatePanel()
@@ -327,6 +373,24 @@ internal sealed class SettingsPage : PageBase
         }
     }
 
+    private async Task InstallAppAsync()
+    {
+        try
+        {
+            string setupPath = await State.Updates.DownloadInstallerAsync();
+            State.Updates.InstallDownloadedUpdate(setupPath);
+            Application.Exit();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Install failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            RefreshUpdateUi();
+        }
+    }
+
     private void RefreshUpdateUi()
     {
         if (InvokeRequired && IsHandleCreated)
@@ -343,6 +407,7 @@ internal sealed class SettingsPage : PageBase
         _checkUpdates.Enabled = !checking && !downloading;
         _downloadUpdate.Enabled = !checking && !downloading && State.Updates.LastResult?.CanDownload == true;
         _updateSpinner.Active = checking || downloading;
+        RefreshInstallUi();
 
         if (downloading)
         {
@@ -354,11 +419,79 @@ internal sealed class SettingsPage : PageBase
         }
     }
 
+    private void RefreshInstallUi()
+    {
+        string? installedPath = ReadInstalledPath();
+        bool installedHere = PathsEqual(installedPath, Application.ExecutablePath);
+        bool checking = State.Updates.IsChecking;
+        bool downloading = State.Updates.IsDownloading;
+
+        _installState.Text = installedHere ? "Installed" : "Portable mode";
+        _installPath.Text = installedHere ? installedPath ?? Application.ExecutablePath : Application.ExecutablePath;
+        _installApp.Enabled = !installedHere && !checking && !downloading && State.Updates.LastResult?.CanInstall == true;
+        _installSpinner.Active = checking || downloading;
+
+        if (installedHere)
+        {
+            _installStatus.Text = "FastTaskMgr is installed.";
+        }
+        else if (downloading)
+        {
+            _installStatus.Text = $"Downloading installer {State.Updates.DownloadProgress:0}%";
+        }
+        else if (checking)
+        {
+            _installStatus.Text = "Checking installer...";
+        }
+        else
+        {
+            _installStatus.Text = State.Updates.LastResult?.CanInstall == true
+                ? "Signed installer is ready."
+                : "Signed installer has not been checked.";
+        }
+    }
+
     private static bool IsAdministrator()
     {
         using WindowsIdentity identity = WindowsIdentity.GetCurrent();
         WindowsPrincipal principal = new(identity);
         return principal.IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    private static string? ReadInstalledPath()
+    {
+        try
+        {
+            using RegistryKey root = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+            using RegistryKey? key = root.OpenSubKey(AppPathsKey);
+            return Convert.ToString(key?.GetValue(""));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool PathsEqual(string? left, string right)
+    {
+        if (string.IsNullOrWhiteSpace(left))
+        {
+            return false;
+        }
+
+        return NormalizePath(left).Equals(NormalizePath(right), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizePath(string path)
+    {
+        try
+        {
+            return Path.GetFullPath(path.Trim().Trim('"'));
+        }
+        catch
+        {
+            return path.Trim().Trim('"');
+        }
     }
 
     private static bool IsTaskManagerReplacementEnabled() => DebuggerTargetsThisApp(ReadTaskManagerDebugger());

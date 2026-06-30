@@ -52,10 +52,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $repo = $env:GITHUB_REPOSITORY
+          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          gh api "repos/$repo/releases/generate-notes" -f tag_name=$env:TAG -q .body | Set-Content $notesPath -Encoding utf8NoBOM
+
           gh release view $env:TAG *> $null
           if ($LASTEXITCODE -eq 0) {
+            gh release edit $env:TAG --notes-file $notesPath
             gh release upload $env:TAG artifacts\FastTaskMgr.exe artifacts\FastTaskMgr.exe.sha256 artifacts\FastTaskMgr-Setup.exe artifacts\FastTaskMgr-Setup.exe.sha256 artifacts\FastTaskMgr-Setup.exe.manifest.json artifacts\FastTaskMgr-Setup.exe.manifest.sig --clobber
           }
           else {
-            gh release create $env:TAG artifacts\FastTaskMgr.exe artifacts\FastTaskMgr.exe.sha256 artifacts\FastTaskMgr-Setup.exe artifacts\FastTaskMgr-Setup.exe.sha256 artifacts\FastTaskMgr-Setup.exe.manifest.json artifacts\FastTaskMgr-Setup.exe.manifest.sig --verify-tag --title $env:TAG --notes "FastTaskMgr $env:TAG"
+            gh release create $env:TAG artifacts\FastTaskMgr.exe artifacts\FastTaskMgr.exe.sha256 artifacts\FastTaskMgr-Setup.exe artifacts\FastTaskMgr-Setup.exe.sha256 artifacts\FastTaskMgr-Setup.exe.manifest.json artifacts\FastTaskMgr-Setup.exe.manifest.sig --verify-tag --title $env:TAG --notes-file $notesPath
           }

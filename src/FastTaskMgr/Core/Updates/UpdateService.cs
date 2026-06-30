@@ -90,6 +90,22 @@ internal sealed class UpdateService : IDisposable
             throw new InvalidOperationException("No downloadable update is available.");
         }
 
+        return await DownloadSetupAsync(result, cancellationToken);
+    }
+
+    public async Task<string> DownloadInstallerAsync(CancellationToken cancellationToken = default)
+    {
+        UpdateCheckResult result = LastResult ?? await CheckAsync(cancellationToken);
+        if (!result.CanInstall || result.DownloadUrl is null)
+        {
+            throw new InvalidOperationException("No signed installer is available.");
+        }
+
+        return await DownloadSetupAsync(result, cancellationToken);
+    }
+
+    private async Task<string> DownloadSetupAsync(UpdateCheckResult result, CancellationToken cancellationToken)
+    {
         if (string.IsNullOrWhiteSpace(result.AssetSha256) || result.AssetSizeBytes <= 0)
         {
             throw new InvalidOperationException("Update metadata is incomplete.");
@@ -216,42 +232,44 @@ internal sealed class UpdateService : IDisposable
             Version normalizedLatest = Normalize(latestVersion!);
             bool updateAvailable = normalizedLatest.CompareTo(CurrentVersion) > 0;
             bool canDownload = false;
+            bool canInstall = false;
             string? assetSha256 = null;
             Uri? downloadUrl = asset is null ? null : new Uri(asset.BrowserDownloadUrl);
             long assetSize = asset?.Size ?? 0;
             string message = "FastTaskMgr is up to date.";
 
-            if (updateAvailable)
+            if (asset is not null && manifestAsset is not null && signatureAsset is not null)
             {
-                if (asset is null || manifestAsset is null || signatureAsset is null)
+                try
                 {
-                    message = "Update found, but signed update assets are missing.";
-                }
-                else
-                {
-                    try
+                    byte[] manifestBytes = await DownloadBytesAsync(new Uri(manifestAsset.BrowserDownloadUrl), cancellationToken);
+                    byte[] signatureBytes = await DownloadBytesAsync(new Uri(signatureAsset.BrowserDownloadUrl), cancellationToken);
+                    if (!UpdateTrust.VerifyManifestSignature(manifestBytes, signatureBytes, UpdateTrust.PublicKeyPem))
                     {
-                        byte[] manifestBytes = await DownloadBytesAsync(new Uri(manifestAsset.BrowserDownloadUrl), cancellationToken);
-                        byte[] signatureBytes = await DownloadBytesAsync(new Uri(signatureAsset.BrowserDownloadUrl), cancellationToken);
-                        if (!UpdateTrust.VerifyManifestSignature(manifestBytes, signatureBytes, UpdateTrust.PublicKeyPem))
-                        {
-                            throw new InvalidOperationException("manifest signature is invalid");
-                        }
-
-                        UpdateManifest manifest = JsonSerializer.Deserialize<UpdateManifest>(manifestBytes, JsonOptions)
-                            ?? throw new InvalidOperationException("manifest is empty");
-                        ValidateManifest(manifest, versionText, normalizedLatest, asset);
-                        assetSha256 = NormalizeSha256(manifest.Sha256);
-                        downloadUrl = new Uri(manifest.DownloadUrl);
-                        assetSize = manifest.SizeBytes;
-                        canDownload = true;
-                        message = "Update available.";
+                        throw new InvalidOperationException("manifest signature is invalid");
                     }
-                    catch (Exception ex)
+
+                    UpdateManifest manifest = JsonSerializer.Deserialize<UpdateManifest>(manifestBytes, JsonOptions)
+                        ?? throw new InvalidOperationException("manifest is empty");
+                    ValidateManifest(manifest, versionText, normalizedLatest, asset);
+                    assetSha256 = NormalizeSha256(manifest.Sha256);
+                    downloadUrl = new Uri(manifest.DownloadUrl);
+                    assetSize = manifest.SizeBytes;
+                    canInstall = true;
+                    canDownload = updateAvailable;
+                    message = updateAvailable ? "Update available." : message;
+                }
+                catch (Exception ex)
+                {
+                    if (updateAvailable)
                     {
                         message = $"Update found, but manifest validation failed: {ex.Message}.";
                     }
                 }
+            }
+            else if (updateAvailable)
+            {
+                message = "Update found, but signed update assets are missing.";
             }
 
             return StoreResult(new UpdateCheckResult(
@@ -260,9 +278,10 @@ internal sealed class UpdateService : IDisposable
                 versionText,
                 updateAvailable,
                 canDownload,
+                canInstall,
                 release.HtmlUrl,
                 asset?.Name,
-                canDownload ? downloadUrl : null,
+                canInstall ? downloadUrl : null,
                 assetSize,
                 assetSha256,
                 message));
@@ -467,6 +486,7 @@ internal sealed record UpdateCheckResult(
     string LatestVersionText,
     bool IsUpdateAvailable,
     bool CanDownload,
+    bool CanInstall,
     string? ReleaseUrl,
     string? AssetName,
     Uri? DownloadUrl,
@@ -480,6 +500,7 @@ internal sealed record UpdateCheckResult(
         "No release",
         false,
         false,
+        false,
         null,
         null,
         null,
@@ -491,6 +512,7 @@ internal sealed record UpdateCheckResult(
         currentVersion,
         null,
         "Unknown",
+        false,
         false,
         false,
         null,
