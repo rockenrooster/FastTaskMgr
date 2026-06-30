@@ -23,6 +23,7 @@ internal sealed class ServicesPage : PageBase
             new("Display name", 260, row => row.DisplayName),
             new("Group", 120, row => row.Group)
         ]);
+        BindTableSort("Services", _table);
 
         Controls.Add(_table);
         Controls.Add(BuildToolbar());

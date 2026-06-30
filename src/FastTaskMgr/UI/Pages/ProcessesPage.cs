@@ -26,6 +26,7 @@ internal sealed class ProcessesPage : PageBase
             new("Handles", 82, row => row.HandleCount.ToString(), row => row.HandleCount),
             new("Path", 420, row => row.Path ?? "")
         ], row => row.ProcessId);
+        BindTableSort("Processes", _table);
         _table.ContextMenuStrip = BuildContextMenu();
         _table.KeyDown += (_, e) =>
         {

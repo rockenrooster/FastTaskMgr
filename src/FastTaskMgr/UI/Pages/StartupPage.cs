@@ -20,6 +20,7 @@ internal sealed class StartupPage : PageBase
             new("Command", 420, row => row.Command),
             new("Source", 260, row => row.Source)
         ]);
+        BindTableSort("Startup apps", _table);
 
         Controls.Add(_table);
         Controls.Add(BuildToolbar());

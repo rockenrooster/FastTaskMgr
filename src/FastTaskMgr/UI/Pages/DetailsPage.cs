@@ -29,6 +29,7 @@ internal sealed class DetailsPage : PageBase
             new("Description", 230, row => row.Description),
             new("Path", 420, row => row.Path ?? "")
         ], row => row.ProcessId);
+        BindTableSort("Details", _table);
         _table.ContextMenuStrip = BuildContextMenu();
         _table.KeyDown += (_, e) =>
         {

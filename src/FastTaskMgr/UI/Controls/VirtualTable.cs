@@ -47,6 +47,26 @@ internal sealed class VirtualTable<T> : ListView
         .Select(index => _rows[index])
         .ToArray();
 
+    public string SortColumnTitle => _columns[_sortColumn].Title;
+    public bool SortDescending => _sortDescending;
+    public event EventHandler? SortChanged;
+
+    public void SetSort(string columnTitle, bool descending)
+    {
+        for (int index = 0; index < _columns.Count; index++)
+        {
+            if (!_columns[index].Title.Equals(columnTitle, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            _sortColumn = index;
+            _sortDescending = descending;
+            UpdateColumnHeaders();
+            return;
+        }
+    }
+
     public void SetRows(IEnumerable<T> rows)
     {
         int horizontalScroll = HorizontalScrollPosition();
@@ -151,6 +171,7 @@ internal sealed class VirtualTable<T> : ListView
 
         SetRows(_rows);
         UpdateColumnHeaders();
+        SortChanged?.Invoke(this, EventArgs.Empty);
         base.OnColumnClick(e);
     }
 

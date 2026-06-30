@@ -26,6 +26,7 @@ internal sealed class AppSettings
     public int WindowHeight { get; set; } = 760;
     public int WindowLeft { get; set; } = -1;
     public int WindowTop { get; set; } = -1;
+    public Dictionary<string, TableSortState> TableSorts { get; set; } = [];
 
     public static string DirectoryPath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FastTaskMgr");
@@ -42,6 +43,11 @@ internal sealed class AppSettings
             }
 
             AppSettings? settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath));
+            if (settings is not null)
+            {
+                settings.TableSorts ??= [];
+            }
+
             return settings ?? new AppSettings();
         }
         catch
@@ -56,6 +62,12 @@ internal sealed class AppSettings
         JsonSerializerOptions options = new() { WriteIndented = true };
         File.WriteAllText(FilePath, JsonSerializer.Serialize(this, options));
     }
+}
+
+internal sealed class TableSortState
+{
+    public string Column { get; set; } = "";
+    public bool Descending { get; set; }
 }
 
 internal static class UpdateSpeedExtensions
