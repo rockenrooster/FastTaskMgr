@@ -228,14 +228,9 @@ internal sealed class PerformanceSampler : IDisposable
     private GpuPerformanceSample[] SampleGpus()
     {
         EnsureGpuCounters();
-        double utilization = 0;
-        if (_gpuUtilCounters is not null)
-        {
-            foreach (PerformanceCounter counter in _gpuUtilCounters)
-            {
-                utilization += ReadCounterValue(counter);
-            }
-        }
+        double utilization = _gpuUtilCounters is null
+            ? 0
+            : BusiestGpuEnginePercent(_gpuUtilCounters.Select(counter => (counter.InstanceName, Percent: ReadCounterValue(counter))));
 
         if ((_gpuUtilCounters is null || _gpuUtilCounters.Count == 0) && _gpuInfo == GpuInfo.Unknown)
         {
@@ -287,7 +282,7 @@ internal sealed class PerformanceSampler : IDisposable
         }
 
         _gpuCountersInitialized = true;
-        _gpuUtilCounters = CreateGpuCounters("GPU Engine", "Utilization Percentage", instance => instance.Contains("engtype_3D", StringComparison.OrdinalIgnoreCase));
+        _gpuUtilCounters = CreateGpuCounters("GPU Engine", "Utilization Percentage", instance => !instance.Equals("_Total", StringComparison.OrdinalIgnoreCase));
         if (_gpuUtilCounters.Count == 0)
         {
             _gpuUtilCounters = CreateGpuCounters("GPU Engine", "Utilization Percentage", _ => true);
@@ -295,6 +290,25 @@ internal sealed class PerformanceSampler : IDisposable
 
         _gpuDedicatedCounters = CreateGpuCounters("GPU Adapter Memory", "Dedicated Usage", PreferredMemoryCounterInstance);
         _gpuSharedCounters = CreateGpuCounters("GPU Adapter Memory", "Shared Usage", PreferredMemoryCounterInstance);
+    }
+
+    internal static double BusiestGpuEnginePercent(IEnumerable<(string InstanceName, double Percent)> samples)
+    {
+        Dictionary<string, double> byEngineType = new(StringComparer.OrdinalIgnoreCase);
+        foreach ((string instanceName, double percent) in samples)
+        {
+            string engineType = GpuEngineType(instanceName);
+            byEngineType[engineType] = byEngineType.GetValueOrDefault(engineType) + Math.Max(0, percent);
+        }
+
+        return byEngineType.Count == 0 ? 0 : byEngineType.Values.Max();
+    }
+
+    private static string GpuEngineType(string instanceName)
+    {
+        const string marker = "engtype_";
+        int start = instanceName.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        return start < 0 ? instanceName : instanceName[(start + marker.Length)..];
     }
 
     private static IReadOnlyList<PerformanceCounter> CreateGpuCounters(string categoryName, string counterName, Func<string, bool> include)

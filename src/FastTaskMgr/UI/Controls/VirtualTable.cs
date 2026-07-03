@@ -107,8 +107,8 @@ internal sealed class VirtualTable<T> : ListView
         }
         finally
         {
-            EndUpdate();
             RestoreHorizontalScroll(horizontalScroll);
+            EndUpdate();
         }
     }
 

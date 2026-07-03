@@ -21,13 +21,14 @@ The release host can be GitHub Releases, S3, a static CDN, or any endpoint that 
 
 ```mermaid
 flowchart TD
-    A["Bump app version"] --> B["Build app"]
-    B --> C["Build installer"]
-    C --> D["Hash installer with SHA-256"]
-    D --> E["Write manifest JSON"]
-    E --> F["Sign manifest with CI private key"]
-    F --> G["Upload installer, manifest, signature"]
-    G --> H["Create or update release tag"]
+    A["Bump app version"] --> B["Create or reuse release tag"]
+    B --> C["Build app"]
+    C --> D["Build installer"]
+    D --> E["Hash installer with SHA-256"]
+    E --> F["Write manifest JSON"]
+    F --> G["Sign manifest with CI private key"]
+    G --> H["Create or update release entry"]
+    H --> I["Upload installer, manifest, signature"]
 ```
 
 The build creates three updater-critical files:
@@ -59,6 +60,7 @@ Release rules:
 - The signature is computed over the exact UTF-8 manifest bytes.
 - CI must fail if the private signing key is missing.
 - The private key never ships with the app.
+- Release notes are optional; the updater does not trust or parse them.
 
 ## App Startup Flow
 
@@ -68,13 +70,14 @@ flowchart TD
     B --> C["Start one background update check"]
     C --> D["Fetch latest release metadata"]
     D --> E{"Latest version > current version?"}
-    E -- "No" --> F["Store result: up to date"]
-    E -- "Yes" --> G["Find installer, manifest, signature assets"]
-    G --> H["Download manifest and signature"]
-    H --> I{"Signature valid?"}
-    I -- "No" --> J["Store result: update found but not trusted"]
-    I -- "Yes" --> K["Validate manifest fields"]
-    K --> L["Store result: update available and downloadable"]
+    E -- "No" --> F["Find installer, manifest, signature assets"]
+    E -- "Yes" --> F
+    F --> G["Download manifest and signature"]
+    G --> H{"Signature valid?"}
+    H -- "No" --> I["Store result: installer not trusted"]
+    H -- "Yes" --> J["Validate manifest fields"]
+    J --> K["Store result: installer trusted"]
+    K --> L["Enable update only if latest > current"]
 ```
 
 The startup check is intentionally lazy:
@@ -87,26 +90,29 @@ The startup check is intentionally lazy:
 
 ## Check Logic
 
-The check compares normalized versions:
+The check compares normalized versions and verifies installer metadata:
 
 1. Read the current version from the running app.
 2. Fetch the latest release metadata.
 3. Parse the release tag as a version, allowing a leading `v`.
-4. If latest is not greater than current, report "up to date".
-5. If newer, require all trusted update assets:
+4. Find all trusted installer assets:
    - installer
    - manifest
    - manifest signature
-6. Verify the manifest signature with the baked-in public key.
-7. Deserialize the manifest.
-8. Validate the manifest against the release metadata.
-9. Store an `UpdateCheckResult` that the UI can render.
+5. Verify the manifest signature with the baked-in public key.
+6. Deserialize the manifest.
+7. Validate the manifest against the release metadata.
+8. Set `CanInstall` when the signed installer is valid.
+9. Set `CanDownload` only when the signed installer is valid and latest is greater than current.
+10. Store an `UpdateCheckResult` that the UI can render.
 
 Validation should fail closed. A newer release with missing or invalid trusted metadata should show a warning/status, not enable installation.
 
+Keeping `CanInstall` separate from `CanDownload` lets a portable build install itself from the latest signed installer even when it is already on the latest version.
+
 ## Manifest Validation
 
-Validate these before enabling download:
+Validate these before enabling install or download:
 
 - `schemaVersion` is supported.
 - `tag` exactly matches the release tag.
@@ -184,6 +190,7 @@ Useful result fields:
 - `LatestVersionText`
 - `IsUpdateAvailable`
 - `CanDownload`
+- `CanInstall`
 - `ReleaseUrl`
 - `AssetName`
 - `DownloadUrl`
@@ -195,6 +202,7 @@ The UI can then do the simple thing:
 
 - Disable "check" while checking or downloading.
 - Enable "download/install" only when `CanDownload` is true.
+- Enable "install app" only when `CanInstall` is true and the current app is not already installed.
 - Show progress while downloading.
 - Show a subtle marker if an update is available.
 - Show validation failures as status text instead of crashing.
