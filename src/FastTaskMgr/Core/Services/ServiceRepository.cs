@@ -6,6 +6,10 @@ namespace FastTaskMgr.Core.Services;
 
 internal sealed class ServiceRepository
 {
+    // Descriptions and load-order groups rarely change; cache them so refreshes
+    // stop re-opening every service for config queries.
+    private readonly Dictionary<string, (string Description, string Group)> _configCache = new(StringComparer.OrdinalIgnoreCase);
+
     public IReadOnlyList<ServiceRow> ListServices()
     {
         using SafeServiceHandle manager = NativeMethods.OpenSCManager(null, null, NativeMethods.ScManagerEnumerateService);
@@ -58,13 +62,14 @@ internal sealed class ServiceRepository
                 IntPtr itemPtr = IntPtr.Add(buffer, index * size);
                 EnumServiceStatusProcess item = Marshal.PtrToStructure<EnumServiceStatusProcess>(itemPtr);
                 string name = Marshal.PtrToStringUni(item.lpServiceName) ?? "";
+                (string description, string group) = ConfigFor(manager, name);
                 rows.Add(new ServiceRow(
                     name,
                     Marshal.PtrToStringUni(item.lpDisplayName) ?? name,
-                    QueryDescription(manager, name),
+                    description,
                     StateName(item.ServiceStatusProcess.dwCurrentState),
                     checked((int)item.ServiceStatusProcess.dwProcessId),
-                    ""));
+                    group));
             }
 
             return rows.OrderBy(row => row.DisplayName, StringComparer.OrdinalIgnoreCase).ToArray();
@@ -92,6 +97,81 @@ internal sealed class ServiceRepository
         if (manager.IsInvalid || service.IsInvalid || !NativeMethods.ControlService(service, NativeMethods.ServiceControlStop, out _))
         {
             throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+    }
+
+    public void Restart(string serviceName)
+    {
+        Stop(serviceName);
+        WaitForStopped(serviceName, TimeSpan.FromSeconds(10));
+        Start(serviceName);
+    }
+
+    private static void WaitForStopped(string serviceName, TimeSpan timeout)
+    {
+        const uint stopped = 1;
+        using SafeServiceHandle manager = NativeMethods.OpenSCManager(null, null, NativeMethods.ScManagerConnect);
+        using SafeServiceHandle service = NativeMethods.OpenService(manager, serviceName, NativeMethods.ServiceQueryStatus);
+        if (manager.IsInvalid || service.IsInvalid)
+        {
+            return;
+        }
+
+        DateTime deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (!NativeMethods.QueryServiceStatusEx(service, 0, out ServiceStatusProcess status, Marshal.SizeOf<ServiceStatusProcess>(), out _)
+                || status.dwCurrentState == stopped)
+            {
+                return;
+            }
+
+            Thread.Sleep(250);
+        }
+
+        throw new TimeoutException($"Service {serviceName} did not stop within {timeout.TotalSeconds:0} seconds.");
+    }
+
+    private (string Description, string Group) ConfigFor(SafeServiceHandle manager, string serviceName)
+    {
+        if (_configCache.TryGetValue(serviceName, out (string Description, string Group) cached))
+        {
+            return cached;
+        }
+
+        (string Description, string Group) config = (QueryDescription(manager, serviceName), QueryGroup(manager, serviceName));
+        _configCache[serviceName] = config;
+        return config;
+    }
+
+    private static string QueryGroup(SafeServiceHandle manager, string serviceName)
+    {
+        using SafeServiceHandle service = NativeMethods.OpenService(manager, serviceName, NativeMethods.ServiceQueryConfig);
+        if (service.IsInvalid)
+        {
+            return "";
+        }
+
+        _ = NativeMethods.QueryServiceConfig(service, IntPtr.Zero, 0, out int bytesNeeded);
+        if (bytesNeeded <= 0)
+        {
+            return "";
+        }
+
+        IntPtr buffer = Marshal.AllocHGlobal(bytesNeeded);
+        try
+        {
+            if (!NativeMethods.QueryServiceConfig(service, buffer, bytesNeeded, out _))
+            {
+                return "";
+            }
+
+            QueryServiceConfigInfo config = Marshal.PtrToStructure<QueryServiceConfigInfo>(buffer);
+            return Marshal.PtrToStringUni(config.lpLoadOrderGroup) ?? "";
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
         }
     }
 

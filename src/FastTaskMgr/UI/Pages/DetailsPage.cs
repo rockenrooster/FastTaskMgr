@@ -12,6 +12,7 @@ internal sealed class DetailsPage : PageBase
     private IReadOnlyList<ProcessRow> _rows = [];
     private string _filter = "";
     private bool _refreshing;
+    private int _pendingFocusPid = -1;
 
     public DetailsPage(AppState state)
         : base(state)
@@ -27,6 +28,8 @@ internal sealed class DetailsPage : PageBase
             new("Priority", 105, row => row.Priority),
             new("Affinity", 92, row => row.Affinity),
             new("Description", 230, row => row.Description),
+            new("Company", 170, row => row.Company),
+            new("Command line", 340, row => row.CommandLine),
             new("Path", 420, row => row.Path ?? "")
         ], row => row.ProcessId);
         BindTableSort("Details", _table);
@@ -56,6 +59,15 @@ internal sealed class DetailsPage : PageBase
     }
 
     public override void OnHide() => _timer.Stop();
+
+    public void FocusProcess(int processId)
+    {
+        _pendingFocusPid = processId;
+        if (_table.SelectKey(processId))
+        {
+            _pendingFocusPid = -1;
+        }
+    }
 
     public override void ApplySearch(string searchText)
     {
@@ -109,6 +121,7 @@ internal sealed class DetailsPage : PageBase
     {
         ContextMenuStrip menu = new();
         menu.Items.Add("End process", null, (_, _) => EndSelected());
+        menu.Items.Add("End process tree", null, (_, _) => EndSelectedTree());
 
         ToolStripMenuItem priority = new("Set priority");
         foreach (string value in new[] { "Idle", "Below normal", "Normal", "Above normal", "High", "Realtime" })
@@ -117,6 +130,7 @@ internal sealed class DetailsPage : PageBase
         }
 
         menu.Items.Add(priority);
+        menu.Items.Add("Set affinity", null, (_, _) => WithSelected(row => Dialogs.AffinityDialog.Show(this, row.ProcessId, row.Name), "Set affinity"));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Open file location", null, (_, _) => WithSelected(ProcessActions.OpenFileLocation, "Open location"));
         menu.Items.Add("Properties", null, (_, _) => WithSelected(ProcessActions.ShowProperties, "Properties"));
@@ -139,6 +153,10 @@ internal sealed class DetailsPage : PageBase
             {
                 _rows = rows;
                 ApplyFilter();
+                if (_pendingFocusPid >= 0 && _table.SelectKey(_pendingFocusPid))
+                {
+                    _pendingFocusPid = -1;
+                }
             }
         }
         finally
@@ -168,6 +186,8 @@ internal sealed class DetailsPage : PageBase
                 || row.ProcessId.ToString().Contains(_filter, StringComparison.OrdinalIgnoreCase)
                 || (row.UserName?.Contains(_filter, StringComparison.OrdinalIgnoreCase) ?? false)
                 || row.Description.Contains(_filter, StringComparison.OrdinalIgnoreCase)
+                || row.Company.Contains(_filter, StringComparison.OrdinalIgnoreCase)
+                || row.CommandLine.Contains(_filter, StringComparison.OrdinalIgnoreCase)
                 || (row.Path?.Contains(_filter, StringComparison.OrdinalIgnoreCase) ?? false));
         }
 
@@ -200,6 +220,32 @@ internal sealed class DetailsPage : PageBase
             {
                 MessageBox.Show(this, $"Could not end {row.Name}. Access may be denied.", "End process", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+    }
+
+    private void EndSelectedTree()
+    {
+        ProcessRow? row = _table.SelectedRow;
+        if (row is null)
+        {
+            return;
+        }
+
+        DialogResult result = MessageBox.Show(
+            this,
+            $"End {row.Name} ({row.ProcessId}) and all processes it started?",
+            "End process tree",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+        if (result != DialogResult.Yes)
+        {
+            return;
+        }
+
+        IReadOnlyList<int> failed = ProcessActions.EndProcessTree(row, _rows);
+        if (failed.Count > 0)
+        {
+            MessageBox.Show(this, $"Could not end {failed.Count} process(es). Access may be denied.", "End process tree", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 

@@ -13,6 +13,7 @@ internal sealed class MainForm : Form
     private readonly Dictionary<string, Button> _navButtons = [];
     private readonly Dictionary<string, PageBase> _pages = [];
     private readonly Font _navSelectedFont;
+    private readonly NotifyIcon _trayIcon = new();
     private PageBase? _currentPage;
     private bool _updateCheckStarted;
 
@@ -37,9 +38,18 @@ internal sealed class MainForm : Form
             Location = new Point(_state.Settings.WindowLeft, _state.Settings.WindowTop);
         }
 
+        BuildTrayIcon();
         BuildLayout();
         RegisterPages();
         _state.SettingsChanged += (_, _) => ApplySettings();
+        _state.DetailsNavigationRequested += (_, pid) =>
+        {
+            ShowPage("Details");
+            if (_pages["Details"] is DetailsPage details)
+            {
+                details.FocusProcess(pid);
+            }
+        };
         ShowPage(string.IsNullOrWhiteSpace(_state.Settings.LastPage) ? _state.Settings.DefaultPage : _state.Settings.LastPage);
         ApplySettings();
     }
@@ -68,6 +78,24 @@ internal sealed class MainForm : Form
         {
             Hide();
         }
+    }
+
+    private void BuildTrayIcon()
+    {
+        _trayIcon.Icon = Icon;
+        _trayIcon.Text = "FastTaskMgr";
+        ContextMenuStrip menu = new();
+        menu.Items.Add("Restore", null, (_, _) => RestoreFromTray());
+        menu.Items.Add("Exit", null, (_, _) => Close());
+        _trayIcon.ContextMenuStrip = menu;
+        _trayIcon.DoubleClick += (_, _) => RestoreFromTray();
+    }
+
+    private void RestoreFromTray()
+    {
+        Show();
+        WindowState = FormWindowState.Normal;
+        Activate();
     }
 
     private void BuildLayout()
@@ -160,7 +188,7 @@ internal sealed class MainForm : Form
         AddPage("Processes", new ProcessesPage(_state));
         AddPage("Performance", new PerformancePage(_state));
         AddPage("Startup apps", new StartupPage(_state));
-        AddPage("Users", new StubPage(_state, "Users", "TODO: WTS session/process rollup."));
+        AddPage("Users", new UsersPage(_state));
         AddPage("Details", new DetailsPage(_state));
         AddPage("Services", new ServicesPage(_state));
         AddPage("Settings", new SettingsPage(_state));
@@ -205,6 +233,7 @@ internal sealed class MainForm : Form
     private void ApplySettings()
     {
         TopMost = _state.Settings.AlwaysOnTop;
+        _trayIcon.Visible = _state.Settings.HideWhenMinimized;
         AppTheme.Apply(this, _state.Settings.Theme);
         UpdateSettingsMarker();
     }
@@ -282,6 +311,7 @@ internal sealed class MainForm : Form
 
         if (disposing)
         {
+            _trayIcon.Dispose();
             _navSelectedFont.Dispose();
         }
     }

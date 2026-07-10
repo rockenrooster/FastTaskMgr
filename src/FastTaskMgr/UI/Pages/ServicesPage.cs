@@ -24,6 +24,7 @@ internal sealed class ServicesPage : PageBase
             new("Group", 120, row => row.Group)
         ]);
         BindTableSort("Services", _table);
+        _table.ContextMenuStrip = BuildContextMenu();
 
         Controls.Add(_table);
         Controls.Add(BuildToolbar());
@@ -63,6 +64,19 @@ internal sealed class ServicesPage : PageBase
         Button button = new() { Text = text, AutoSize = true, Height = 30 };
         button.Click += (_, _) => action();
         panel.Controls.Add(button);
+    }
+
+    private ContextMenuStrip BuildContextMenu()
+    {
+        ContextMenuStrip menu = new();
+        menu.Items.Add("Start", null, (_, _) => WithSelected(row => RunServiceAction(() => State.Services.Start(row.Name))));
+        menu.Items.Add("Stop", null, (_, _) => WithSelected(row => RunServiceAction(() => State.Services.Stop(row.Name))));
+        menu.Items.Add("Restart", null, (_, _) => RestartSelected());
+        menu.Items.Add(new ToolStripSeparator());
+        ToolStripItem goToDetails = menu.Items.Add("Go to details", null, (_, _) => WithSelected(row => State.RequestDetails(row.ProcessId)));
+        menu.Items.Add("Search online", null, (_, _) => WithSelected(row => Process.Start(new ProcessStartInfo($"https://www.bing.com/search?q={Uri.EscapeDataString(row.Name)}") { UseShellExecute = true })));
+        menu.Opening += (_, _) => goToDetails.Enabled = _table.SelectedRow is { ProcessId: > 0 };
+        return menu;
     }
 
     private async Task RefreshRowsAsync()
@@ -105,11 +119,7 @@ internal sealed class ServicesPage : PageBase
 
     private void RestartSelected()
     {
-        WithSelected(row => RunServiceAction(() =>
-        {
-            State.Services.Stop(row.Name);
-            State.Services.Start(row.Name);
-        }));
+        WithSelected(row => RunServiceAction(() => State.Services.Restart(row.Name)));
     }
 
     private async void RunServiceAction(Action action)

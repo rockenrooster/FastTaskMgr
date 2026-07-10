@@ -97,8 +97,10 @@ internal sealed class ProcessesPage : PageBase
     {
         ContextMenuStrip menu = new();
         menu.Items.Add("End task", null, (_, _) => EndSelected());
+        menu.Items.Add("End process tree", null, (_, _) => EndSelectedTree());
         menu.Items.Add("Restart Explorer", null, (_, _) => RestartExplorer());
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Go to details", null, (_, _) => WithSelected(row => State.RequestDetails(row.ProcessId), "Go to details"));
         menu.Items.Add("Open file location", null, (_, _) => WithSelected(ProcessActions.OpenFileLocation, "Open location"));
         menu.Items.Add("Properties", null, (_, _) => WithSelected(ProcessActions.ShowProperties, "Properties"));
         menu.Items.Add("Search online", null, (_, _) => WithSelected(ProcessActions.SearchOnline, "Search online"));
@@ -185,6 +187,32 @@ internal sealed class ProcessesPage : PageBase
             {
                 MessageBox.Show(this, $"Could not end {row.Name}. Access may be denied.", "End task", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+    }
+
+    private void EndSelectedTree()
+    {
+        ProcessRow? row = _table.SelectedRow;
+        if (row is null)
+        {
+            return;
+        }
+
+        DialogResult result = MessageBox.Show(
+            this,
+            $"End {row.Name} ({row.ProcessId}) and all processes it started?",
+            "End process tree",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+        if (result != DialogResult.Yes)
+        {
+            return;
+        }
+
+        IReadOnlyList<int> failed = ProcessActions.EndProcessTree(row, _rows);
+        if (failed.Count > 0)
+        {
+            MessageBox.Show(this, $"Could not end {failed.Count} process(es). Access may be denied.", "End process tree", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 

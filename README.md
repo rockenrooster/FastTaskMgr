@@ -10,12 +10,15 @@ FastTaskMgr is a fast, lightweight Windows 11 Task Manager alternative built wit
 
 ## Features
 
-- Processes page with search, sorting, CPU, memory, and process I/O columns.
+- Processes page with search, sorting, CPU, memory, and process I/O columns, plus end task, end process tree, and go to details.
+- Fast process sampling: one system snapshot call per refresh instead of per-process handle queries.
 - Performance page with CPU, memory, disk, and network tiles and graphs.
-- Details page with process metadata, priority, affinity display, handles, and threads.
-- Services page backed by Service Control Manager APIs.
+- Details page with user, architecture, description, company, command line, priority, and affinity, including set priority, set affinity, and end process tree.
+- Users page with per-session process, CPU, and memory rollup plus disconnect and sign off.
+- Services page backed by Service Control Manager APIs, with group column and go to details.
 - Startup apps page for registry and startup-folder entries.
 - Settings for theme, update speed, always-on-top, admin startup, and end-task confirmation.
+- Tray icon restore when hide-on-minimize is enabled.
 - Signed update checks against GitHub Releases.
 
 ## Download
@@ -69,6 +72,7 @@ Artifacts are written to `artifacts\`.
 ## Release Notes For Maintainers
 
 Release tags use `vX.Y.Z.W`.
+Add user-visible changes to the `Unreleased` section of [CHANGELOG.md](CHANGELOG.md) as you go. `release.ps1` promotes those notes to a versioned section, and the release workflow publishes them as the GitHub release notes. If no notes are present, GitHub's auto-generated notes are used instead.
 
 ```powershell
 .\release.ps1 -Version 0.1.0.30
@@ -78,9 +82,8 @@ Tagged releases are built by GitHub Actions. Signed update manifests require the
 
 ## Known Gaps
 
-- Users page is currently a stub.
 - Exact Windows Task Manager grouping is not implemented.
-- GPU, per-process network, startup impact, dump creation, wait-chain analysis, and full affinity editing are not implemented yet.
+- GPU per-process usage, per-process network, startup impact, dump creation, and wait-chain analysis are not implemented yet.
 - Some process and service actions require elevation. Access denied is expected for protected or elevated targets.
 
 See [PARITY.md](src/FastTaskMgr/PARITY.md) for the detailed parity matrix.

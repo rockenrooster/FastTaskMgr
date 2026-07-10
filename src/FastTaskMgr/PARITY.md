@@ -6,13 +6,13 @@ Target: Windows 11 Task Manager behavior on Windows 11 x64. Status values track 
 | --- | --- | --- | --- |
 | Processes page shell | Done | WinForms virtual list | Left nav, search, command bar, virtual rows. |
 | Apps/background/Windows process grouping | Partial | Process snapshot + metadata | Exact Windows grouping is undocumented; first pass shows a flat list. |
-| Process tree | Partial | Parent PID from NtQueryInformationProcess | Parent PID is collected; expand/collapse tree UI is not implemented yet. |
-| Process name | Done | System.Diagnostics.Process | No WMI hot path. |
-| PID | Done | System.Diagnostics.Process | Direct process ID. |
-| Process status | Partial | Process.Responding | Shows running/not responding; suspended detection is not complete. |
-| CPU percent | Done | Process CPU deltas | Computed over sample interval. |
-| Memory usage | Done | Process.WorkingSet64 | Access denied rows degrade gracefully. |
-| Disk throughput per process | Partial | GetProcessIoCounters | Sortable process I/O byte delta; exact Task Manager disk-only accounting likely requires ETW. |
+| Process tree | Partial | Parent PID from SystemProcessInformation snapshot | Parent PID is collected for every row; expand/collapse tree UI is not implemented yet. |
+| Process name | Done | NtQuerySystemInformation snapshot | Single syscall for all processes per tick. |
+| PID | Done | NtQuerySystemInformation snapshot | Direct process ID. |
+| Process status | Done | Snapshot thread states + IsHungAppWindow | Running, not responding, and suspended (all threads wait-suspended). |
+| CPU percent | Done | Snapshot kernel+user time deltas | Keyed by PID plus create time to survive PID reuse. |
+| Memory usage | Done | Snapshot working set | Access denied rows degrade gracefully. |
+| Disk throughput per process | Partial | Snapshot I/O transfer counters | Sortable process I/O byte delta with no per-process handle opens; exact Task Manager disk-only accounting likely requires ETW. |
 | Network throughput per process | Not possible yet | ETW candidate | Public low-overhead per-process accounting is limited. |
 | GPU usage per process | Not possible yet | PDH GPU Engine counters candidate | Not implemented; counter names vary by OS/GPU driver. |
 | Power usage | Not possible yet | Heuristic candidate | Not implemented; will only be shown as an approximation. |
@@ -24,8 +24,8 @@ Target: Windows 11 Task Manager behavior on Windows 11 x64. Status values track 
 | Open file location | Done | Explorer select command | Disabled when path unavailable. |
 | Properties | Done | Shell properties verb | Disabled when path unavailable. |
 | Search online | Done | Default browser URL | Only user-triggered network action. |
-| Go to details | Partial | Local navigation candidate | Details page exists; row jump is not wired yet. |
-| Efficiency/suspended status | Not possible yet | SetProcessInformation candidate | Not implemented in first pass. |
+| Go to details | Done | In-app navigation | Context menu jumps to Details and selects the row. |
+| Efficiency/suspended status | Partial | Snapshot thread states | Suspended status is shown; setting efficiency mode is not implemented. |
 | Performance page shell | Done | WinForms custom drawing | Clickable sidebar tiles and detail graphs. |
 | CPU utilization graph | Done | GetSystemTimes + NtQuerySystemInformation | Total CPU plus per-logical-processor detail graphs. |
 | CPU speed | Partial | CallNtPowerInformation | Base/max MHz shown; live current speed is not shown yet. |
@@ -42,31 +42,31 @@ Target: Windows 11 Task Manager behavior on Windows 11 x64. Status values track 
 | Startup apps page | Done | Registry + startup folders | HKCU/HKLM Run and startup folders. |
 | Startup enabled/disabled | Partial | Conservative move/restore | FastTaskMgr can toggle supported entries; StartupApproved parity is not complete. |
 | Startup impact | Not possible yet | Local heuristic/history candidate | Exact Windows impact source is undocumented. |
-| Users page | Partial | Stub + WTS APIs candidate | UI stub exists; WTS session/process rollup is not implemented yet. |
+| Users page | Done | WTSEnumerateSessions + snapshot session IDs | Per-session process count, CPU, and memory rollup with disconnect/sign off actions. |
 | Details page shell | Done | WinForms virtual list | Flat process table. |
-| User name | Partial | Process token + LookupAccountSid | Access denied rows are blank. |
-| Architecture | Done | IsWow64Process2 | x86/x64/ARM64 where API succeeds. |
-| Description/company | Partial | FileVersionInfo | Description shown; company column not added yet. |
-| Command line | Not possible yet | PEB/NtQueryInformationProcess candidate | Not implemented; protected/elevated processes may fail. |
+| User name | Partial | Process token + LookupAccountSid, cached per process | Access denied rows are blank. |
+| Architecture | Done | IsWow64Process2, cached per process | x86/x64/ARM64 where API succeeds. |
+| Description/company | Done | FileVersionInfo, cached per path | Description and Company columns. |
+| Command line | Done | NtQueryInformationProcess(ProcessCommandLineInformation) | Cached per process; blank for protected/elevated targets. |
 | UAC virtualization | Not possible yet | Token APIs candidate | Not implemented in first pass. |
-| Priority | Done | GetPriorityClass/SetPriorityClass | Setting may need elevation. |
-| Affinity | Partial | GetProcessAffinityMask | Displayed; setting affinity is not implemented yet. |
-| Handles/threads | Done | Process APIs | Per-process counts where accessible. |
+| Priority | Done | Snapshot base priority / SetPriorityClass | Setting may need elevation. |
+| Affinity | Done | Get/SetProcessAffinityMask | Displayed and editable via the affinity dialog. |
+| Handles/threads | Done | NtQuerySystemInformation snapshot | Per-process counts for every row. |
 | End process | Needs elevation | OpenProcess + TerminateProcess | Works when permitted. |
-| End process tree | Not possible yet | Descendant walk candidate | Not implemented in first pass. |
+| End process tree | Done | Parent PID descendant walk | Ends the target and all live descendants; protected targets may deny access. |
 | Set priority | Needs elevation | SetPriorityClass | Works when permitted. |
-| Set affinity | Not possible yet | SetProcessAffinityMask candidate | Not implemented in first pass. |
+| Set affinity | Done | SetProcessAffinityMask | Affinity dialog with per-CPU checkboxes; may need elevation. |
 | Analyze wait chain | Not possible yet | Wait Chain Traversal API candidate | Not implemented in first pass. |
 | Create dump file | Not possible yet | MiniDumpWriteDump candidate | Not implemented in first pass. |
 | Services page | Done | Service Control Manager APIs | Direct P/Invoke, no System.ServiceProcess package. |
 | Service name/PID/description/status | Done | EnumServicesStatusEx + QueryServiceConfig2 | PID available only when running. |
-| Service group | Partial | SCM candidate | Column exists; group is not populated yet. |
-| Service start/stop/restart | Needs elevation | StartService/ControlService | Many services require admin. |
+| Service group | Done | QueryServiceConfig load-order group | Cached per service name. |
+| Service start/stop/restart | Needs elevation | StartService/ControlService | Restart waits for the service to stop before starting; many services require admin. |
 | Open Services console | Done | ShellExecute services.msc | User-triggered. |
-| Go to details for service process | Partial | Local navigation candidate | PID is shown; row jump is not wired yet. |
+| Go to details for service process | Done | In-app navigation | Context menu jumps to Details when the service has a PID. |
 | Settings page | Done | JSON in LocalAppData | `%LocalAppData%\FastTaskMgr\settings.json`. |
 | Always on top | Done | WinForms TopMost | Stored setting. |
-| Minimize/hide behavior | Partial | WinForms window state | Hide-on-minimize implemented; tray restore is not implemented yet. |
+| Minimize/hide behavior | Done | WinForms window state + NotifyIcon | Hide-on-minimize with tray icon restore and exit. |
 | Theme light/dark/system | Partial | WinForms colors + registry system setting | Lightweight theme only. |
 | Confirm before ending process | Done | Stored setting | On by default. |
 | Remember layout | Done | Settings JSON | Size, position, start page, update speed. |

@@ -28,6 +28,9 @@ internal sealed class AppState : IDisposable
     public bool IsUpdateAvailable => _updates.IsValueCreated && _updates.Value.LastResult?.IsUpdateAvailable == true;
 
     public event EventHandler? SettingsChanged;
+    public event EventHandler<int>? DetailsNavigationRequested;
+
+    public void RequestDetails(int processId) => DetailsNavigationRequested?.Invoke(this, processId);
 
     public static AppState Load() => new(AppSettings.Load());
 
@@ -40,6 +43,11 @@ internal sealed class AppState : IDisposable
     public void Dispose()
     {
         Settings.Save();
+        if (_processes.IsValueCreated)
+        {
+            _processes.Value.Dispose();
+        }
+
         if (_performance.IsValueCreated)
         {
             _performance.Value.Dispose();

@@ -13,6 +13,7 @@ internal sealed class VirtualTable<T> : ListView
     private int _sortColumn;
     private bool _sortDescending;
     private int _hotIndex = -1;
+    private int _userHorizontalScroll;
 
     public VirtualTable(IReadOnlyList<TableColumn<T>> columns, Func<T, object?>? keySelector = null)
     {
@@ -67,9 +68,34 @@ internal sealed class VirtualTable<T> : ListView
         }
     }
 
+    // The native list view occasionally scrolls itself while the mouse rests over it
+    // (hot-item updates during content churn), so the current scroll position cannot be
+    // trusted as the user's intent. Track intent from real input and re-assert it on refresh.
+    protected override void WndProc(ref Message m)
+    {
+        const int lvmSetItemCount = 0x102F;
+        const int lvsicfNoScroll = 0x2;
+        if (m.Msg == lvmSetItemCount)
+        {
+            // WinForms sends this without LVSICF_NOSCROLL, and on count changes the native
+            // control then scrolls the focused item into view, flashing the viewport back
+            // to column 0. Adding the flag keeps the scroll position untouched.
+            m.LParam = (IntPtr)((long)m.LParam | lvsicfNoScroll);
+        }
+
+        base.WndProc(ref m);
+        const int wmKeyDown = 0x0100;
+        const int wmHScroll = 0x0114;
+        const int wmMouseHWheel = 0x020E;
+        if (m.Msg is wmHScroll or wmMouseHWheel or wmKeyDown)
+        {
+            _userHorizontalScroll = HorizontalScrollPosition();
+        }
+    }
+
     public void SetRows(IEnumerable<T> rows)
     {
-        int horizontalScroll = HorizontalScrollPosition();
+        int horizontalScroll = _userHorizontalScroll;
         BeginUpdate();
         try
         {
@@ -107,9 +133,29 @@ internal sealed class VirtualTable<T> : ListView
         }
         finally
         {
-            RestoreHorizontalScroll(horizontalScroll);
+            // EndUpdate must come first: re-enabling redraw runs the list view's deferred
+            // "scroll focused item into view" (triggered by item-count changes while a row
+            // is selected), which would otherwise undo the restore.
             EndUpdate();
+            RestoreHorizontalScroll(horizontalScroll);
         }
+    }
+
+    public bool SelectKey(object key)
+    {
+        for (int index = 0; index < _rows.Count; index++)
+        {
+            if (key.Equals(_keySelector(_rows[index])))
+            {
+                SelectedIndices.Clear();
+                SelectedIndices.Add(index);
+                EnsureVisible(index);
+                _userHorizontalScroll = HorizontalScrollPosition();
+                return true;
+            }
+        }
+
+        return false;
     }
 
     protected override void OnRetrieveVirtualItem(RetrieveVirtualItemEventArgs e)

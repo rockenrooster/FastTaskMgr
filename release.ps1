@@ -76,6 +76,33 @@ function Get-GeneratedCommitBody {
     "Changes:`n" + ($items -join "`n")
 }
 
+function Update-ChangelogForRelease {
+    param([string]$ReleaseVersion)
+
+    $changelogPath = Join-Path $PSScriptRoot "CHANGELOG.md"
+    if (!(Test-Path $changelogPath)) {
+        return $false
+    }
+
+    $content = Get-Content $changelogPath -Raw
+    $match = [regex]::Match($content, '(?ms)^## Unreleased\s*?\r?\n(.*?)(?=^## |\z)')
+    if (!$match.Success) {
+        return $false
+    }
+
+    $placeholder = '- Add upcoming user-visible changes here before tagging a release.'
+    $entries = @(($match.Groups[1].Value -split '\r?\n') | Where-Object { $_.TrimEnd() -and $_.Trim() -ne $placeholder })
+    if (!($entries | Where-Object { $_ -match '^\s*[-*] ' })) {
+        return $false
+    }
+
+    $date = Get-Date -Format 'yyyy-MM-dd'
+    $newBlock = "## Unreleased`n`n$placeholder`n`n## $ReleaseVersion - $date`n`n" + ($entries -join "`n") + "`n`n"
+    $content = $content.Substring(0, $match.Index) + $newBlock + $content.Substring($match.Index + $match.Length)
+    Set-Content $changelogPath -Value $content -NoNewline
+    return $true
+}
+
 if ([string]::IsNullOrWhiteSpace($Version)) {
     $Version = Get-DefaultReleaseVersion
 }
@@ -107,6 +134,13 @@ if (![string]::IsNullOrWhiteSpace($remoteTag)) {
 }
 
 Set-ProjectVersion
+
+if (Update-ChangelogForRelease $Version) {
+    Write-Host "Promoted CHANGELOG.md Unreleased notes to $Version" -ForegroundColor Cyan
+}
+else {
+    Write-Host "CHANGELOG.md has no Unreleased notes; GitHub release notes will be auto-generated." -ForegroundColor Yellow
+}
 
 RunGit add -A
 

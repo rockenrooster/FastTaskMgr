@@ -3,138 +3,211 @@ using FastTaskMgr.Core.Native;
 
 namespace FastTaskMgr.Core.Processes;
 
-internal sealed class ProcessSampler
+internal sealed class ProcessSampler : IDisposable
 {
     private readonly Lock _lock = new();
-    private readonly Dictionary<string, string> _descriptionsByPath = new(StringComparer.OrdinalIgnoreCase);
-    private Dictionary<int, TimeSpan> _lastCpuTimes = [];
-    private Dictionary<int, ulong> _lastIoBytes = [];
-    private DateTime _lastSampleUtc = DateTime.UtcNow;
+    private readonly SystemProcessReader _reader = new();
+    private readonly Dictionary<string, FileInfoEntry> _fileInfoByPath = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<ProcessKey, ProcessIdentity> _identities = [];
+    private Dictionary<ProcessKey, CounterSample> _lastCounters = [];
+    private long _lastTimestamp;
+
+    private readonly record struct ProcessKey(int ProcessId, long CreateTime);
+    private readonly record struct CounterSample(ulong CpuTime100ns, ulong IoBytes);
+    private sealed record FileInfoEntry(string Description, string Company);
+
+    // Immutable per process lifetime, so resolved once per (pid, create time) instead of per tick.
+    private sealed class ProcessIdentity
+    {
+        public string? Path;
+        public string? UserName;
+        public string Architecture = "";
+        public string CommandLine = "";
+        public bool PathResolved;
+        public bool DetailsResolved;
+    }
 
     public IReadOnlyList<ProcessRow> Sample(bool includeDetails = false)
     {
         lock (_lock)
         {
-            DateTime now = DateTime.UtcNow;
-            double elapsedSeconds = Math.Max(0.001, (now - _lastSampleUtc).TotalSeconds);
-            Dictionary<int, TimeSpan> nextCpuTimes = [];
-            Dictionary<int, ulong> nextIoBytes = [];
-            List<ProcessRow> rows = [];
+            List<SystemProcessEntry> entries = _reader.Read();
+            (_, HashSet<int> hungPids) = WindowSnapshot.Query();
 
-            foreach (Process process in Process.GetProcesses())
+            long now = Stopwatch.GetTimestamp();
+            double elapsedSeconds = _lastTimestamp == 0
+                ? 0
+                : Math.Max(0.001, (now - _lastTimestamp) / (double)Stopwatch.Frequency);
+            _lastTimestamp = now;
+
+            Dictionary<ProcessKey, CounterSample> nextCounters = new(entries.Count);
+            List<ProcessRow> rows = new(entries.Count);
+            foreach (SystemProcessEntry entry in entries)
             {
-                using (process)
+                ProcessKey key = new(entry.ProcessId, entry.CreateTime);
+                nextCounters[key] = new CounterSample(entry.CpuTime100ns, entry.IoTransferBytes);
+
+                double cpuPercent = 0;
+                double diskBytesPerSecond = 0;
+                if (elapsedSeconds > 0 && _lastCounters.TryGetValue(key, out CounterSample last))
                 {
-                    ProcessRow? row = TryReadProcess(process, elapsedSeconds, nextCpuTimes, nextIoBytes, includeDetails);
-                    if (row is not null)
+                    if (entry.CpuTime100ns >= last.CpuTime100ns)
                     {
-                        rows.Add(row);
+                        cpuPercent = Math.Min(
+                            100,
+                            (entry.CpuTime100ns - last.CpuTime100ns) / (elapsedSeconds * 10_000_000d * Environment.ProcessorCount) * 100);
+                    }
+
+                    if (entry.IoTransferBytes >= last.IoBytes)
+                    {
+                        diskBytesPerSecond = (entry.IoTransferBytes - last.IoBytes) / elapsedSeconds;
                     }
                 }
+
+                rows.Add(BuildRow(entry, key, cpuPercent, diskBytesPerSecond, hungPids, includeDetails));
             }
 
-            _lastCpuTimes = nextCpuTimes;
-            _lastIoBytes = nextIoBytes;
-            _lastSampleUtc = now;
+            _lastCounters = nextCounters;
+            PruneIdentities(nextCounters);
             return rows;
         }
     }
 
-    private ProcessRow? TryReadProcess(Process process, double elapsedSeconds, Dictionary<int, TimeSpan> nextCpuTimes, Dictionary<int, ulong> nextIoBytes, bool includeDetails)
+    private ProcessRow BuildRow(
+        SystemProcessEntry entry,
+        ProcessKey key,
+        double cpuPercent,
+        double diskBytesPerSecond,
+        HashSet<int> hungPids,
+        bool includeDetails)
     {
-        int pid;
-        try
+        if (!_identities.TryGetValue(key, out ProcessIdentity? identity))
         {
-            pid = process.Id;
-        }
-        catch
-        {
-            return null;
+            identity = new ProcessIdentity();
+            _identities[key] = identity;
         }
 
-        string name = Safe(() => process.ProcessName, $"PID {pid}");
-        TimeSpan totalCpu = Safe(() => process.TotalProcessorTime, TimeSpan.Zero);
-        nextCpuTimes[pid] = totalCpu;
-
-        double cpuPercent = 0;
-        if (_lastCpuTimes.TryGetValue(pid, out TimeSpan lastCpu))
-        {
-            cpuPercent = Math.Max(0, (totalCpu - lastCpu).TotalMilliseconds / (elapsedSeconds * 1000 * Environment.ProcessorCount) * 100);
-        }
-
-        ulong ioBytes = NativeMethods.QueryProcessIoBytes(pid);
-        nextIoBytes[pid] = ioBytes;
-        double diskBytesPerSecond = _lastIoBytes.TryGetValue(pid, out ulong lastIoBytes) && ioBytes >= lastIoBytes
-            ? (ioBytes - lastIoBytes) / elapsedSeconds
-            : 0;
-
-        string? path = NativeMethods.QueryProcessImagePath(pid);
-        string description = "";
-        string userName = "";
-        string architecture = "";
-        string priority = "";
         string affinity = "";
-        if (includeDetails)
+        bool canOpen = entry.ProcessId > 0;
+        bool needsStatic = canOpen && (!identity.PathResolved || (includeDetails && !identity.DetailsResolved));
+        if (needsStatic || (canOpen && includeDetails))
         {
-            if (!string.IsNullOrWhiteSpace(path))
+            using SafeNativeHandle process = NativeMethods.OpenProcess(
+                NativeMethods.ProcessQueryLimitedInformation, false, entry.ProcessId);
+            if (!identity.PathResolved)
             {
-                description = DescriptionFor(path);
+                identity.Path = NativeMethods.QueryProcessImagePath(process);
+                identity.PathResolved = true;
             }
 
-            userName = NativeMethods.QueryProcessUserName(pid) ?? "";
-            architecture = NativeMethods.QueryProcessArchitecture(pid);
-            priority = NativeMethods.QueryPriority(pid);
-            affinity = NativeMethods.QueryAffinity(pid);
+            if (includeDetails)
+            {
+                if (!identity.DetailsResolved)
+                {
+                    identity.UserName = NativeMethods.QueryProcessUserName(process);
+                    identity.Architecture = NativeMethods.QueryProcessArchitecture(process);
+                    identity.CommandLine = NativeMethods.QueryProcessCommandLine(process) ?? "";
+                    identity.DetailsResolved = true;
+                }
+
+                affinity = NativeMethods.QueryAffinity(process);
+            }
         }
 
-        bool hasWindow = Safe(() => process.MainWindowHandle != IntPtr.Zero, false);
-        bool responding = !hasWindow || Safe(() => process.Responding, true);
+        string description = "";
+        string company = "";
+        if (includeDetails && identity.Path is { Length: > 0 })
+        {
+            FileInfoEntry info = FileInfoFor(identity.Path);
+            description = info.Description;
+            company = info.Company;
+        }
+
+        string status = entry.IsSuspended
+            ? "Suspended"
+            : hungPids.Contains(entry.ProcessId) ? "Not responding" : "Running";
 
         return new ProcessRow(
-            pid,
-            null,
-            name,
-            responding ? "Running" : "Not responding",
-            Math.Min(100, cpuPercent),
-            Safe(() => process.WorkingSet64, 0),
+            entry.ProcessId,
+            entry.ParentProcessId,
+            entry.Name,
+            status,
+            cpuPercent,
+            entry.WorkingSetBytes,
             diskBytesPerSecond,
-            Safe(() => process.Threads.Count, 0),
-            Safe(() => process.HandleCount, 0),
-            path,
-            userName,
-            architecture,
+            entry.ThreadCount,
+            entry.HandleCount,
+            entry.SessionId,
+            identity.Path,
+            identity.UserName,
+            identity.Architecture,
             description,
-            priority,
+            company,
+            identity.CommandLine,
+            PriorityName(entry.BasePriority),
             affinity);
     }
 
-    private string DescriptionFor(string path)
+    private void PruneIdentities(Dictionary<ProcessKey, CounterSample> liveKeys)
     {
-        if (_descriptionsByPath.TryGetValue(path, out string? description))
+        if (_identities.Count <= liveKeys.Count)
         {
-            return description;
+            return;
         }
 
-        description = Safe(() => FileVersionInfo.GetVersionInfo(path).FileDescription ?? "", "");
-        // ponytail: clear-on-churn beats an LRU until path churn is actually measurable.
-        if (_descriptionsByPath.Count > 2048)
+        List<ProcessKey> dead = [];
+        foreach (ProcessKey key in _identities.Keys)
         {
-            _descriptionsByPath.Clear();
+            if (!liveKeys.ContainsKey(key))
+            {
+                dead.Add(key);
+            }
         }
 
-        _descriptionsByPath[path] = description;
-        return description;
+        foreach (ProcessKey key in dead)
+        {
+            _identities.Remove(key);
+        }
     }
 
-    private static T Safe<T>(Func<T> read, T fallback)
+    private FileInfoEntry FileInfoFor(string path)
     {
+        if (_fileInfoByPath.TryGetValue(path, out FileInfoEntry? info))
+        {
+            return info;
+        }
+
         try
         {
-            return read();
+            FileVersionInfo version = FileVersionInfo.GetVersionInfo(path);
+            info = new FileInfoEntry(version.FileDescription ?? "", version.CompanyName ?? "");
         }
         catch
         {
-            return fallback;
+            info = new FileInfoEntry("", "");
         }
+
+        // ponytail: clear-on-churn beats an LRU until path churn is actually measurable.
+        if (_fileInfoByPath.Count > 2048)
+        {
+            _fileInfoByPath.Clear();
+        }
+
+        _fileInfoByPath[path] = info;
+        return info;
     }
+
+    // Base priority is reported by the snapshot, so the priority class costs no extra handle opens.
+    private static string PriorityName(int basePriority) => basePriority switch
+    {
+        4 => "Idle",
+        6 => "Below normal",
+        8 => "Normal",
+        10 => "Above normal",
+        13 => "High",
+        24 => "Realtime",
+        _ => basePriority.ToString()
+    };
+
+    public void Dispose() => _reader.Dispose();
 }

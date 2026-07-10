@@ -13,7 +13,7 @@ internal static class SelfCheck
         try
         {
             using AppState state = AppState.Load();
-            bool hasProcesses = state.Processes.Sample().Count > 0;
+            bool hasProcesses = ProcessSnapshotSelfCheck(state);
             bool hasMemory = state.Performance.Sample().TotalMemoryBytes > 0;
             bool updateTrustWorks = UpdateTrustSelfCheck();
             bool gpuEngineAggregationWorks = GpuEngineAggregationSelfCheck();
@@ -25,6 +25,23 @@ internal static class SelfCheck
         {
             return 1;
         }
+    }
+
+    private static bool ProcessSnapshotSelfCheck(AppState state)
+    {
+        _ = state.Processes.Sample(includeDetails: true);
+        Thread.Sleep(500);
+        IReadOnlyList<Core.Processes.ProcessRow> rows = state.Processes.Sample(includeDetails: true);
+        Core.Processes.ProcessRow? self = rows.FirstOrDefault(row => row.ProcessId == Environment.ProcessId);
+        return rows.Count > 0
+            && self is not null
+            && self.WorkingSetBytes > 10 * 1024 * 1024
+            && self.ThreadCount > 0
+            && !string.IsNullOrEmpty(self.Path)
+            && !string.IsNullOrEmpty(self.UserName)
+            && !string.IsNullOrEmpty(self.CommandLine)
+            && self.SessionId > 0
+            && rows.All(row => row.CpuPercent >= 0 && row.CpuPercent <= 100);
     }
 
     private static bool UpdateTrustSelfCheck()

@@ -58,7 +58,7 @@ internal static partial class NativeMethods
     private static extern bool GetProcessAffinityMask(SafeNativeHandle hProcess, out UIntPtr lpProcessAffinityMask, out UIntPtr lpSystemAffinityMask);
 
     [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetProcessIoCounters(SafeNativeHandle hProcess, out IoCounters lpIoCounters);
+    private static extern bool SetProcessAffinityMask(SafeNativeHandle hProcess, UIntPtr dwProcessAffinityMask);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool IsWow64Process2(SafeNativeHandle hProcess, out ushort pProcessMachine, out ushort pNativeMachine);
@@ -67,7 +67,7 @@ internal static partial class NativeMethods
     private static extern int NtQueryInformationProcess(
         SafeNativeHandle processHandle,
         int processInformationClass,
-        out ProcessBasicInformation processInformation,
+        IntPtr processInformation,
         int processInformationLength,
         out int returnLength);
 
@@ -148,6 +148,13 @@ internal static partial class NativeMethods
     public static extern SafeServiceHandle OpenService(SafeServiceHandle hSCManager, string lpServiceName, uint dwDesiredAccess);
 
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool QueryServiceConfig(
+        SafeServiceHandle hService,
+        IntPtr lpServiceConfig,
+        int cbBufSize,
+        out int pcbBytesNeeded);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern bool QueryServiceConfig2(
         SafeServiceHandle hService,
         uint dwInfoLevel,
@@ -169,9 +176,8 @@ internal static partial class NativeMethods
     [DllImport("advapi32.dll", SetLastError = true)]
     public static extern bool ControlService(SafeServiceHandle hService, uint dwControl, out ServiceStatus serviceStatus);
 
-    public static string? QueryProcessImagePath(int pid)
+    public static string? QueryProcessImagePath(SafeNativeHandle process)
     {
-        using SafeNativeHandle process = OpenProcess(ProcessQueryLimitedInformation, false, pid);
         if (process.IsInvalid)
         {
             return null;
@@ -194,16 +200,40 @@ internal static partial class NativeMethods
         return QueryFullProcessImageName(process, 0, path, ref length) ? path.ToString() : null;
     }
 
-    public static int? QueryParentProcessId(int pid)
+    public static string? QueryProcessCommandLine(SafeNativeHandle process)
     {
-        using SafeNativeHandle process = OpenProcess(ProcessQueryLimitedInformation, false, pid);
         if (process.IsInvalid)
         {
             return null;
         }
 
-        int status = NtQueryInformationProcess(process, 0, out ProcessBasicInformation info, Marshal.SizeOf<ProcessBasicInformation>(), out _);
-        return status >= 0 ? info.InheritedFromUniqueProcessId.ToInt32() : null;
+        const int processCommandLineInformation = 60;
+        int status = NtQueryInformationProcess(process, processCommandLineInformation, IntPtr.Zero, 0, out int length);
+        if (length <= 0)
+        {
+            return null;
+        }
+
+        IntPtr buffer = Marshal.AllocHGlobal(length);
+        try
+        {
+            status = NtQueryInformationProcess(process, processCommandLineInformation, buffer, length, out _);
+            if (status < 0)
+            {
+                return null;
+            }
+
+            // The buffer starts with a UNICODE_STRING header followed by the characters.
+            ushort byteLength = (ushort)Marshal.ReadInt16(buffer, 0);
+            IntPtr characters = Marshal.ReadIntPtr(buffer, IntPtr.Size);
+            return characters == IntPtr.Zero || byteLength == 0
+                ? ""
+                : Marshal.PtrToStringUni(characters, byteLength / 2);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
     }
 
     public static bool TerminateProcessById(int pid)
@@ -212,9 +242,8 @@ internal static partial class NativeMethods
         return !process.IsInvalid && TerminateProcess(process, 1);
     }
 
-    public static string? QueryProcessUserName(int pid)
+    public static string? QueryProcessUserName(SafeNativeHandle process)
     {
-        using SafeNativeHandle process = OpenProcess(ProcessQueryLimitedInformation, false, pid);
         if (process.IsInvalid || !OpenProcessToken(process, TokenQuery, out SafeNativeHandle token))
         {
             return null;
@@ -256,9 +285,8 @@ internal static partial class NativeMethods
         }
     }
 
-    public static string QueryProcessArchitecture(int pid)
+    public static string QueryProcessArchitecture(SafeNativeHandle process)
     {
-        using SafeNativeHandle process = OpenProcess(ProcessQueryLimitedInformation, false, pid);
         if (process.IsInvalid || !IsWow64Process2(process, out ushort processMachine, out ushort nativeMachine))
         {
             return Environment.Is64BitOperatingSystem ? "x64" : "x86";
@@ -274,9 +302,8 @@ internal static partial class NativeMethods
         };
     }
 
-    public static string QueryPriority(int pid)
+    public static string QueryPriority(SafeNativeHandle process)
     {
-        using SafeNativeHandle process = OpenProcess(ProcessQueryLimitedInformation, false, pid);
         if (process.IsInvalid)
         {
             return "Access denied";
@@ -303,9 +330,8 @@ internal static partial class NativeMethods
         }
     }
 
-    public static string QueryAffinity(int pid)
+    public static string QueryAffinity(SafeNativeHandle process)
     {
-        using SafeNativeHandle process = OpenProcess(ProcessQueryLimitedInformation, false, pid);
         if (process.IsInvalid || !GetProcessAffinityMask(process, out UIntPtr processMask, out _))
         {
             return "";
@@ -314,12 +340,28 @@ internal static partial class NativeMethods
         return $"0x{processMask.ToUInt64():X}";
     }
 
-    public static ulong QueryProcessIoBytes(int pid)
+    public static bool QueryAffinityMasks(int pid, out ulong processMask, out ulong systemMask)
     {
+        processMask = 0;
+        systemMask = 0;
         using SafeNativeHandle process = OpenProcess(ProcessQueryLimitedInformation, false, pid);
-        return !process.IsInvalid && GetProcessIoCounters(process, out IoCounters counters)
-            ? counters.ReadTransferCount + counters.WriteTransferCount
-            : 0;
+        if (process.IsInvalid || !GetProcessAffinityMask(process, out UIntPtr processValue, out UIntPtr systemValue))
+        {
+            return false;
+        }
+
+        processMask = processValue.ToUInt64();
+        systemMask = systemValue.ToUInt64();
+        return true;
+    }
+
+    public static void SetAffinity(int pid, ulong mask)
+    {
+        using SafeNativeHandle process = OpenProcess(ProcessSetInformation | ProcessQueryLimitedInformation, false, pid);
+        if (process.IsInvalid || !SetProcessAffinityMask(process, new UIntPtr(mask)))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
     }
 
     public static ProcessorPerformanceInformation[] QueryProcessorPerformance()
@@ -578,28 +620,6 @@ internal struct ProcessorPowerInformation
     public uint CurrentIdleState;
 }
 
-[StructLayout(LayoutKind.Sequential)]
-internal struct ProcessBasicInformation
-{
-    public IntPtr Reserved1;
-    public IntPtr PebBaseAddress;
-    public IntPtr Reserved2A;
-    public IntPtr Reserved2B;
-    public IntPtr UniqueProcessId;
-    public IntPtr InheritedFromUniqueProcessId;
-}
-
-[StructLayout(LayoutKind.Sequential)]
-internal struct IoCounters
-{
-    public ulong ReadOperationCount;
-    public ulong WriteOperationCount;
-    public ulong OtherOperationCount;
-    public ulong ReadTransferCount;
-    public ulong WriteTransferCount;
-    public ulong OtherTransferCount;
-}
-
 internal enum TokenInformationClass
 {
     TokenUser = 1
@@ -670,4 +690,18 @@ internal struct ServiceStatus
 internal struct ServiceDescription
 {
     public IntPtr lpDescription;
+}
+
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+internal struct QueryServiceConfigInfo
+{
+    public uint dwServiceType;
+    public uint dwStartType;
+    public uint dwErrorControl;
+    public IntPtr lpBinaryPathName;
+    public IntPtr lpLoadOrderGroup;
+    public uint dwTagId;
+    public IntPtr lpDependencies;
+    public IntPtr lpServiceStartName;
+    public IntPtr lpDisplayName;
 }
