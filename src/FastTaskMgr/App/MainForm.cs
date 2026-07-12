@@ -57,7 +57,26 @@ internal sealed class MainForm : Form
     protected override async void OnShown(EventArgs e)
     {
         base.OnShown(e);
+        StartPerformanceWarmup();
         await StartLazyUpdateCheckAsync();
+    }
+
+    // The first PDH touch costs over a second. Pay it here in the background so the
+    // Performance page has warm counters and a cached sample by the time it is opened.
+    private void StartPerformanceWarmup()
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                _ = _state.Performance.Sample();
+                await Task.Delay(1000);
+                _ = _state.Performance.Sample();
+            }
+            catch
+            {
+            }
+        });
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)

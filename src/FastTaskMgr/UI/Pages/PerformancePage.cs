@@ -110,6 +110,11 @@ internal sealed class PerformancePage : PageBase
     public override async void OnShow()
     {
         ConfigureTimer();
+        if (_latest is null && State.Performance.LastSample is { } cached)
+        {
+            RenderSample(cached); // paint instantly from the warm-up sample
+        }
+
         await RefreshSampleAsync();
     }
 

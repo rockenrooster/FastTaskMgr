@@ -2,7 +2,6 @@ using System.Runtime.InteropServices;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
-using System.Diagnostics;
 using System.Text;
 using FastTaskMgr.Core.Native;
 using Microsoft.Win32;
@@ -15,30 +14,33 @@ internal sealed class PerformanceSampler : IDisposable
     private readonly CpuInfo _cpuInfo = ReadCpuInfo();
     private readonly MemorySpec _memorySpec = ReadMemorySpec();
     private readonly GpuInfo _gpuInfo = ReadGpuInfo();
-    private readonly Dictionary<string, PerformanceCounter> _diskActiveCounters = [];
-    private readonly Dictionary<string, PerformanceCounter> _diskReadCounters = [];
-    private readonly Dictionary<string, PerformanceCounter> _diskWriteCounters = [];
     private readonly Dictionary<int, string> _diskModels = [];
-    private string[] _diskInstances = [];
-    private long _diskInstancesRefreshedAt = long.MinValue;
     private Dictionary<int, string> _poolMemberDiskToLetter = [];
     private long _poolMappingRefreshedAt = long.MinValue;
     private readonly Dictionary<string, (long sent, long received, DateTime time)> _lastNetworkBytes = [];
-    private IReadOnlyList<PerformanceCounter>? _gpuUtilCounters;
-    private IReadOnlyList<PerformanceCounter>? _gpuDedicatedCounters;
-    private IReadOnlyList<PerformanceCounter>? _gpuSharedCounters;
-    private bool _gpuCountersInitialized;
-    private bool _compressedMemoryUnavailable;
-    private PerformanceCounter? _compressedMemoryCounter;
+    private PdhQuery? _pdh;
+    private bool _pdhInitialized;
+    private IntPtr _diskIdleCounter;
+    private IntPtr _diskReadCounter;
+    private IntPtr _diskWriteCounter;
+    private IntPtr _gpuUtilCounter;
+    private IntPtr _gpuDedicatedCounter;
+    private IntPtr _gpuSharedCounter;
+    private IntPtr _compressedPagesCounter;
+    private volatile PerformanceSample? _lastSample;
     private ProcessorPerformanceInformation[] _lastProcessorInfo = [];
     private ulong _lastIdle;
     private ulong _lastKernel;
     private ulong _lastUser;
 
+    /// <summary>Last completed sample; lets the Performance page paint instantly on open.</summary>
+    public PerformanceSample? LastSample => _lastSample;
+
     public PerformanceSample Sample(bool fastFirstPaint = false)
     {
         lock (_lock)
         {
+            bool collected = CollectPdh(fastFirstPaint);
             double cpuPercent = SampleCpu();
             double[] corePercents = SampleCpuCores();
             MemoryStatusEx memory = MemoryStatusEx.Create();
@@ -46,7 +48,7 @@ internal sealed class PerformanceSampler : IDisposable
             _ = NativeMethods.GetPerformanceInfo(out PerformanceInformation info, Marshal.SizeOf<PerformanceInformation>());
             ulong pageSize = info.PageSize;
 
-            return new PerformanceSample(
+            PerformanceSample sample = new(
                 cpuPercent,
                 corePercents,
                 _cpuInfo,
@@ -59,7 +61,7 @@ internal sealed class PerformanceSampler : IDisposable
                 new MemoryDetails(
                     (ulong)info.KernelPaged * pageSize,
                     (ulong)info.KernelNonpaged * pageSize,
-                    SampleCompressedMemory(pageSize, fastFirstPaint),
+                    SampleCompressedMemory(pageSize, collected),
                     _memorySpec.SpeedMtps,
                     _memorySpec.SlotsUsed,
                     _memorySpec.SlotsTotal),
@@ -67,10 +69,37 @@ internal sealed class PerformanceSampler : IDisposable
                 info.ThreadCount,
                 info.HandleCount,
                 TimeSpan.FromMilliseconds(Environment.TickCount64),
-                SampleDisks(fastFirstPaint),
+                SampleDisks(collected),
                 SampleNetworks(),
-                fastFirstPaint ? [] : SampleGpus());
+                collected ? SampleGpus() : []);
+            _lastSample = sample;
+            return sample;
         }
+    }
+
+    // The first PDH touch costs over a second; keep it off the first-paint path. A background
+    // warm-up sample at app start normally pays this before the Performance page ever opens.
+    private bool CollectPdh(bool fastFirstPaint)
+    {
+        if (!_pdhInitialized)
+        {
+            if (fastFirstPaint)
+            {
+                return false;
+            }
+
+            _pdhInitialized = true;
+            _pdh = new PdhQuery();
+            _diskIdleCounter = _pdh.AddCounter(@"\PhysicalDisk(*)\% Idle Time");
+            _diskReadCounter = _pdh.AddCounter(@"\PhysicalDisk(*)\Disk Read Bytes/sec");
+            _diskWriteCounter = _pdh.AddCounter(@"\PhysicalDisk(*)\Disk Write Bytes/sec");
+            _gpuUtilCounter = _pdh.AddCounter(@"\GPU Engine(*)\Utilization Percentage");
+            _gpuDedicatedCounter = _pdh.AddCounter(@"\GPU Adapter Memory(*)\Dedicated Usage");
+            _gpuSharedCounter = _pdh.AddCounter(@"\GPU Adapter Memory(*)\Shared Usage");
+            _compressedPagesCounter = _pdh.AddCounter(@"\Memory\Compressed Page Count");
+        }
+
+        return _pdh is not null && _pdh.Collect();
     }
 
     private double SampleCpu()
@@ -132,19 +161,37 @@ internal sealed class PerformanceSampler : IDisposable
 
     // Physical disks, like Windows Task Manager. Logical-volume counters miss virtual
     // volumes whose driver bypasses the volume perf stack (e.g. StableBit DrivePool),
-    // where activity is only visible on the underlying member disks.
-    private DiskPerformanceSample[] SampleDisks(bool fastFirstPaint)
+    // where activity is only visible on the underlying member disks. Disk identity comes
+    // from the volume table so tiles render before PDH data exists.
+    private DiskPerformanceSample[] SampleDisks(bool collected)
     {
-        List<RawDisk> raw = [];
-        foreach (string instance in PhysicalDiskInstances())
-        {
-            string[] tokens = instance.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (tokens.Length == 0 || !int.TryParse(tokens[0], out int index))
-            {
-                continue;
-            }
+        Dictionary<int, double> idleByDisk = ReadDiskValues(collected, _diskIdleCounter);
+        Dictionary<int, double> readByDisk = ReadDiskValues(collected, _diskReadCounter);
+        Dictionary<int, double> writeByDisk = ReadDiskValues(collected, _diskWriteCounter);
 
-            string[] letters = tokens.Skip(1).ToArray();
+        Dictionary<int, List<string>> lettersByDisk = [];
+        foreach (VolumeInfo volume in NativeMethods.QueryVolumes())
+        {
+            string? letter = volume.MountPaths.FirstOrDefault(path => path.Length == 3 && path[1] == ':');
+            foreach (int disk in volume.DiskNumbers)
+            {
+                if (!lettersByDisk.TryGetValue(disk, out List<string>? letters))
+                {
+                    letters = [];
+                    lettersByDisk[disk] = letters;
+                }
+
+                if (letter is not null)
+                {
+                    letters.Add(letter[..2]);
+                }
+            }
+        }
+
+        List<RawDisk> raw = [];
+        foreach (int index in lettersByDisk.Keys.Union(idleByDisk.Keys).OrderBy(index => index))
+        {
+            string[] letters = lettersByDisk.TryGetValue(index, out List<string>? found) ? found.Order().ToArray() : [];
             long total = 0;
             long free = 0;
             List<string> formats = [];
@@ -171,15 +218,15 @@ internal sealed class PerformanceSampler : IDisposable
                 _diskModels[index] = model;
             }
 
-            double idle = fastFirstPaint ? 100 : ReadCounter(_diskActiveCounters, "% Idle Time", instance, primeValue: 100);
+            double idle = idleByDisk.TryGetValue(index, out double idleValue) ? idleValue : 100;
             raw.Add(new RawDisk(
                 index,
                 letters,
                 model,
                 formats.Distinct().ToArray(),
                 Math.Clamp(100 - idle, 0, 100),
-                fastFirstPaint ? 0 : ReadCounter(_diskReadCounters, "Disk Read Bytes/sec", instance),
-                fastFirstPaint ? 0 : ReadCounter(_diskWriteCounters, "Disk Write Bytes/sec", instance),
+                readByDisk.GetValueOrDefault(index),
+                writeByDisk.GetValueOrDefault(index),
                 total,
                 free));
         }
@@ -394,49 +441,26 @@ internal sealed class PerformanceSampler : IDisposable
         long TotalBytes,
         long FreeBytes);
 
-    private string[] PhysicalDiskInstances()
+    // PDH wildcard instances look like "5 D:"; the leading number is the physical disk index.
+    private Dictionary<int, double> ReadDiskValues(bool collected, IntPtr counter)
     {
-        if (_diskInstancesRefreshedAt != long.MinValue
-            && Environment.TickCount64 - _diskInstancesRefreshedAt < 15000
-            && _diskInstances.Length > 0)
+        Dictionary<int, double> values = [];
+        if (!collected || _pdh is null)
         {
-            return _diskInstances;
+            return values;
         }
 
-        try
+        foreach ((string instance, double value) in _pdh.ReadArray(counter))
         {
-            _diskInstances = new PerformanceCounterCategory("PhysicalDisk").GetInstanceNames()
-                .Where(instance => !instance.Equals("_Total", StringComparison.OrdinalIgnoreCase))
-                .ToArray();
-        }
-        catch
-        {
-            _diskInstances = [];
-        }
-
-        _diskInstancesRefreshedAt = Environment.TickCount64;
-        return _diskInstances;
-    }
-
-    private static double ReadCounter(Dictionary<string, PerformanceCounter> counters, string counterName, string instance, double primeValue = 0)
-    {
-        string key = counterName + "|" + instance;
-        try
-        {
-            if (!counters.TryGetValue(key, out PerformanceCounter? counter))
+            int cut = instance.IndexOf(' ');
+            string indexToken = cut < 0 ? instance : instance[..cut];
+            if (int.TryParse(indexToken, out int index))
             {
-                counter = new PerformanceCounter("PhysicalDisk", counterName, instance, readOnly: true);
-                _ = counter.NextValue();
-                counters[key] = counter;
-                return primeValue;
+                values[index] = Math.Max(0, value);
             }
+        }
 
-            return Math.Max(0, counter.NextValue());
-        }
-        catch
-        {
-            return primeValue;
-        }
+        return values;
     }
 
     private NetworkPerformanceSample[] SampleNetworks()
@@ -494,69 +518,59 @@ internal sealed class PerformanceSampler : IDisposable
 
     private GpuPerformanceSample[] SampleGpus()
     {
-        EnsureGpuCounters();
-        double utilization = _gpuUtilCounters is null
-            ? 0
-            : BusiestGpuEnginePercent(_gpuUtilCounters.Select(counter => (counter.InstanceName, Percent: ReadCounterValue(counter))));
-
-        if ((_gpuUtilCounters is null || _gpuUtilCounters.Count == 0) && _gpuInfo == GpuInfo.Unknown)
+        List<(string Instance, double Value)> engines = _pdh?.ReadArray(_gpuUtilCounter) ?? [];
+        if (engines.Count == 0 && _gpuInfo == GpuInfo.Unknown)
         {
             return [];
         }
 
-        long dedicated = SumCounterBytes(_gpuDedicatedCounters);
-        long shared = SumCounterBytes(_gpuSharedCounters);
+        double utilization = BusiestGpuEnginePercent(engines
+            .Where(engine => !engine.Instance.Equals("_Total", StringComparison.OrdinalIgnoreCase))
+            .Select(engine => (engine.Instance, engine.Value)));
         return
         [
             new GpuPerformanceSample(
                 "gpu:0",
                 _gpuInfo.Name,
-                _gpuUtilCounters is { Count: > 0 } ? "Windows GPU counters" : "Adapter info only",
+                engines.Count > 0 ? "Windows GPU counters" : "Adapter info only",
                 Math.Clamp(utilization, 0, 100),
-                dedicated,
+                ReadGpuMemoryBytes(_gpuDedicatedCounter),
                 _gpuInfo.DedicatedMemoryTotalBytes,
-                shared,
+                ReadGpuMemoryBytes(_gpuSharedCounter),
                 null)
         ];
     }
 
-    private ulong? SampleCompressedMemory(ulong pageSize, bool fastFirstPaint)
+    private long ReadGpuMemoryBytes(IntPtr counter)
     {
-        if (fastFirstPaint || _compressedMemoryUnavailable)
+        List<(string Instance, double Value)> values = _pdh?.ReadArray(counter) ?? [];
+        double total = 0;
+        foreach ((string instance, double value) in values)
         {
-            return null;
+            if (instance.Equals("_Total", StringComparison.OrdinalIgnoreCase))
+            {
+                total = value;
+                break;
+            }
+
+            if (!instance.Contains("pid_", StringComparison.OrdinalIgnoreCase))
+            {
+                total += value;
+            }
         }
 
-        try
-        {
-            _compressedMemoryCounter ??= new PerformanceCounter("Memory", "Compressed Page Count", readOnly: true);
-            return (ulong)Math.Max(0, _compressedMemoryCounter.NextValue()) * pageSize;
-        }
-        catch
-        {
-            _compressedMemoryCounter?.Dispose();
-            _compressedMemoryCounter = null;
-            _compressedMemoryUnavailable = true;
-            return null;
-        }
+        return (long)Math.Min(long.MaxValue, Math.Max(0, total));
     }
 
-    private void EnsureGpuCounters()
+    private ulong? SampleCompressedMemory(ulong pageSize, bool collected)
     {
-        if (_gpuCountersInitialized)
+        if (!collected || _pdh is null)
         {
-            return;
+            return null;
         }
 
-        _gpuCountersInitialized = true;
-        _gpuUtilCounters = CreateGpuCounters("GPU Engine", "Utilization Percentage", instance => !instance.Equals("_Total", StringComparison.OrdinalIgnoreCase));
-        if (_gpuUtilCounters.Count == 0)
-        {
-            _gpuUtilCounters = CreateGpuCounters("GPU Engine", "Utilization Percentage", _ => true);
-        }
-
-        _gpuDedicatedCounters = CreateGpuCounters("GPU Adapter Memory", "Dedicated Usage", PreferredMemoryCounterInstance);
-        _gpuSharedCounters = CreateGpuCounters("GPU Adapter Memory", "Shared Usage", PreferredMemoryCounterInstance);
+        double? pages = _pdh.ReadValue(_compressedPagesCounter);
+        return pages is null ? null : (ulong)Math.Max(0, pages.Value) * pageSize;
     }
 
     internal static double BusiestGpuEnginePercent(IEnumerable<(string InstanceName, double Percent)> samples)
@@ -576,79 +590,6 @@ internal sealed class PerformanceSampler : IDisposable
         const string marker = "engtype_";
         int start = instanceName.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
         return start < 0 ? instanceName : instanceName[(start + marker.Length)..];
-    }
-
-    private static IReadOnlyList<PerformanceCounter> CreateGpuCounters(string categoryName, string counterName, Func<string, bool> include)
-    {
-        try
-        {
-            if (!PerformanceCounterCategory.Exists(categoryName))
-            {
-                return [];
-            }
-
-            PerformanceCounterCategory category = new(categoryName);
-            string[] instances = category.GetInstanceNames()
-                .Where(instance => !string.IsNullOrWhiteSpace(instance) && include(instance))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-            if (instances.Any(instance => instance.Equals("_Total", StringComparison.OrdinalIgnoreCase)))
-            {
-                instances = ["_Total"];
-            }
-
-            List<PerformanceCounter> counters = [];
-            foreach (string instance in instances)
-            {
-                try
-                {
-                    PerformanceCounter counter = new(categoryName, counterName, instance, readOnly: true);
-                    _ = counter.NextValue();
-                    counters.Add(counter);
-                }
-                catch
-                {
-                }
-            }
-
-            return counters;
-        }
-        catch
-        {
-            return [];
-        }
-    }
-
-    private static bool PreferredMemoryCounterInstance(string instance) =>
-        instance.Equals("_Total", StringComparison.OrdinalIgnoreCase)
-        || !instance.Contains("pid_", StringComparison.OrdinalIgnoreCase);
-
-    private static double ReadCounterValue(PerformanceCounter counter)
-    {
-        try
-        {
-            return Math.Max(0, counter.NextValue());
-        }
-        catch
-        {
-            return 0;
-        }
-    }
-
-    private static long SumCounterBytes(IReadOnlyList<PerformanceCounter>? counters)
-    {
-        if (counters is null)
-        {
-            return 0;
-        }
-
-        double total = 0;
-        foreach (PerformanceCounter counter in counters)
-        {
-            total += ReadCounterValue(counter);
-        }
-
-        return (long)Math.Min(long.MaxValue, Math.Max(0, total));
     }
 
     private static bool IsVisibleNetworkAdapter(NetworkInterface adapter, string ipAddress)
@@ -919,41 +860,7 @@ internal sealed class PerformanceSampler : IDisposable
     private static uint ReadUInt32(byte[] raw, int offset, int length, int fieldOffset) =>
         fieldOffset + 4 <= length ? BitConverter.ToUInt32(raw, offset + fieldOffset) : 0;
 
-    public void Dispose()
-    {
-        foreach (PerformanceCounter counter in _diskActiveCounters.Values)
-        {
-            counter.Dispose();
-        }
-
-        foreach (PerformanceCounter counter in _diskReadCounters.Values)
-        {
-            counter.Dispose();
-        }
-
-        foreach (PerformanceCounter counter in _diskWriteCounters.Values)
-        {
-            counter.Dispose();
-        }
-
-        DisposeCounters(_gpuUtilCounters);
-        DisposeCounters(_gpuDedicatedCounters);
-        DisposeCounters(_gpuSharedCounters);
-        _compressedMemoryCounter?.Dispose();
-    }
-
-    private static void DisposeCounters(IReadOnlyList<PerformanceCounter>? counters)
-    {
-        if (counters is null)
-        {
-            return;
-        }
-
-        foreach (PerformanceCounter counter in counters)
-        {
-            counter.Dispose();
-        }
-    }
+    public void Dispose() => _pdh?.Dispose();
 
     private sealed record MemorySpec(int SpeedMtps, int SlotsUsed, int SlotsTotal);
 

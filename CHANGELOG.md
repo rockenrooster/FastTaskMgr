@@ -6,6 +6,11 @@ All notable changes to FastTaskMgr are documented here.
 
 - Add upcoming user-visible changes here before tagging a release.
 
+## 0.1.0.41 - 2026-07-12
+
+### Changed
+- The Performance page now opens instantly: performance counters warm up in the background at app start, the last sample is cached for immediate first paint, and all counters are collected through a single PDH query per refresh instead of one query per counter instance (GPU sampling alone previously polled hundreds of instances every tick).
+
 ## 0.1.0.40 - 2026-07-11
 
 ### Fixed
