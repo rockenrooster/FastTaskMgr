@@ -21,6 +21,8 @@ internal sealed class PerformancePage : PageBase
     private readonly Dictionary<string, List<double>> _history = [];
     private readonly Dictionary<string, PerfTile> _tiles = [];
     private readonly Dictionary<int, GraphControl> _cpuCoreGraphs = [];
+    private readonly Dictionary<string, GraphControl> _diskMemberGraphs = [];
+    private TableLayoutPanel? _memberGrid;
     private IReadOnlyList<PerfItem> _currentItems = [];
     private IReadOnlyList<StatItem> _currentStats = [];
     private string? _renderedDetailKey;
@@ -178,6 +180,10 @@ internal sealed class PerformancePage : PageBase
         foreach (DiskPerformanceSample disk in _latest.Disks)
         {
             AddHistory(disk.Key, Math.Min(100, disk.ActivePercent));
+            foreach (DiskPerformanceSample member in disk.Members ?? [])
+            {
+                AddHistory(member.Key, Math.Min(100, member.ActivePercent));
+            }
         }
 
         foreach (NetworkPerformanceSample network in _latest.Networks)
@@ -310,11 +316,22 @@ internal sealed class PerformancePage : PageBase
             return;
         }
 
+        DiskPerformanceSample? diskSample = _latest.Disks.FirstOrDefault(disk => disk.Key == item.Key);
+        if (diskSample?.Members is { Count: > 0 })
+        {
+            RenderDiskMemberGraphs(item, diskSample);
+            SetStats(StatsFor(item));
+            _renderedDetailKey = item.Key;
+            return;
+        }
+
         if (_renderedDetailKey != item.Key || _detailGraph is null || !_detailHost.Controls.Contains(_detailGraph))
         {
             _detailHost.Controls.Clear();
             _cpuCoreGraphs.Clear();
             _cpuGrid = null;
+            _diskMemberGraphs.Clear();
+            _memberGrid = null;
             _detailGraph = new GraphControl { Dock = DockStyle.Fill };
             _detailHost.Controls.Add(_detailGraph);
         }
@@ -337,6 +354,8 @@ internal sealed class PerformancePage : PageBase
         {
             _detailHost.Controls.Clear();
             _detailGraph = null;
+            _diskMemberGraphs.Clear();
+            _memberGrid = null;
             _cpuCoreGraphs.Clear();
             _cpuGridColumns = columns;
             _cpuGrid = new TableLayoutPanel
@@ -380,6 +399,68 @@ internal sealed class PerformancePage : PageBase
         }
     }
 
+    private void RenderDiskMemberGraphs(PerfItem item, DiskPerformanceSample disk)
+    {
+        IReadOnlyList<DiskPerformanceSample> members = disk.Members ?? [];
+        int count = Math.Max(1, members.Count);
+        int columns = count <= 2 ? 1 : 2;
+        int rows = (int)Math.Ceiling(count / (double)columns);
+
+        bool rebuild = _renderedDetailKey != item.Key
+            || _memberGrid is null
+            || _diskMemberGraphs.Count != count
+            || members.Any(member => !_diskMemberGraphs.ContainsKey(member.Key));
+        if (rebuild)
+        {
+            _detailHost.Controls.Clear();
+            _detailGraph = null;
+            _cpuCoreGraphs.Clear();
+            _cpuGrid = null;
+            _diskMemberGraphs.Clear();
+            _memberGrid = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = columns,
+                RowCount = rows,
+                Padding = new Padding(0)
+            };
+
+            for (int column = 0; column < columns; column++)
+            {
+                _memberGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / columns));
+            }
+
+            for (int row = 0; row < rows; row++)
+            {
+                _memberGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / rows));
+            }
+
+            for (int index = 0; index < members.Count; index++)
+            {
+                GraphControl graph = new()
+                {
+                    Dock = DockStyle.Fill,
+                    Margin = new Padding(2),
+                    LineColor = DiskColor,
+                    FillColor = Color.FromArgb(48, DiskColor)
+                };
+                _diskMemberGraphs[members[index].Key] = graph;
+                _memberGrid.Controls.Add(graph, index % columns, index / columns);
+            }
+
+            _detailHost.Controls.Add(_memberGrid);
+        }
+
+        foreach (DiskPerformanceSample member in members)
+        {
+            if (_diskMemberGraphs.TryGetValue(member.Key, out GraphControl? graph))
+            {
+                graph.Caption = $"{member.Name}   Active {member.ActivePercent:0}%   R: {FormatUtil.Bytes((long)member.ReadBytesPerSecond)}/s   W: {FormatUtil.Bytes((long)member.WriteBytesPerSecond)}/s";
+                graph.SetSamples(GetHistory(member.Key));
+            }
+        }
+    }
+
     private StatItem[] StatsFor(PerfItem item)
     {
         if (_latest is null)
@@ -408,7 +489,7 @@ internal sealed class PerformancePage : PageBase
         DiskPerformanceSample? disk = _latest.Disks.FirstOrDefault(disk => disk.Key == item.Key);
         if (disk is not null)
         {
-            return
+            List<StatItem> stats =
             [
                 new("Used", FormatUtil.Bytes(disk.UsedBytes)),
                 new("Used %", $"{(disk.TotalBytes <= 0 ? 0 : (double)disk.UsedBytes / disk.TotalBytes * 100):0}%"),
@@ -419,6 +500,14 @@ internal sealed class PerformancePage : PageBase
                 new("Write speed", $"{FormatUtil.Bytes((long)disk.WriteBytesPerSecond)}/s"),
                 new("Format", disk.Kind)
             ];
+            foreach (DiskPerformanceSample member in disk.Members ?? [])
+            {
+                stats.Add(new StatItem(
+                    member.Name,
+                    $"{member.ActivePercent:0}%  R {FormatUtil.Bytes((long)member.ReadBytesPerSecond)}/s  W {FormatUtil.Bytes((long)member.WriteBytesPerSecond)}/s"));
+            }
+
+            return stats.ToArray();
         }
 
         NetworkPerformanceSample? network = _latest.Networks.FirstOrDefault(network => network.Key == item.Key);

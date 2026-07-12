@@ -18,6 +18,11 @@ internal sealed class PerformanceSampler : IDisposable
     private readonly Dictionary<string, PerformanceCounter> _diskActiveCounters = [];
     private readonly Dictionary<string, PerformanceCounter> _diskReadCounters = [];
     private readonly Dictionary<string, PerformanceCounter> _diskWriteCounters = [];
+    private readonly Dictionary<int, string> _diskModels = [];
+    private string[] _diskInstances = [];
+    private long _diskInstancesRefreshedAt = long.MinValue;
+    private Dictionary<int, string> _poolMemberDiskToLetter = [];
+    private long _poolMappingRefreshedAt = long.MinValue;
     private readonly Dictionary<string, (long sent, long received, DateTime time)> _lastNetworkBytes = [];
     private IReadOnlyList<PerformanceCounter>? _gpuUtilCounters;
     private IReadOnlyList<PerformanceCounter>? _gpuDedicatedCounters;
@@ -125,50 +130,312 @@ internal sealed class PerformanceSampler : IDisposable
         return values;
     }
 
+    // Physical disks, like Windows Task Manager. Logical-volume counters miss virtual
+    // volumes whose driver bypasses the volume perf stack (e.g. StableBit DrivePool),
+    // where activity is only visible on the underlying member disks.
     private DiskPerformanceSample[] SampleDisks(bool fastFirstPaint)
     {
-        List<DiskPerformanceSample> disks = [];
-        int index = 0;
-        foreach (DriveInfo drive in DriveInfo.GetDrives().Where(drive => drive.IsReady))
+        List<RawDisk> raw = [];
+        foreach (string instance in PhysicalDiskInstances())
         {
-            string driveName = drive.Name.TrimEnd('\\');
-            long total = drive.TotalSize;
-            long free = drive.AvailableFreeSpace;
-            long used = total - free;
-            disks.Add(new DiskPerformanceSample(
-                $"disk:{drive.Name}",
-                $"Disk {index} ({driveName})",
-                drive.DriveFormat,
-                fastFirstPaint ? 0 : Math.Clamp(ReadCounter(_diskActiveCounters, "% Disk Time", driveName), 0, 100),
-                fastFirstPaint ? 0 : ReadCounter(_diskReadCounters, "Disk Read Bytes/sec", driveName),
-                fastFirstPaint ? 0 : ReadCounter(_diskWriteCounters, "Disk Write Bytes/sec", driveName),
-                used,
-                free,
-                total));
-            index++;
+            string[] tokens = instance.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (tokens.Length == 0 || !int.TryParse(tokens[0], out int index))
+            {
+                continue;
+            }
+
+            string[] letters = tokens.Skip(1).ToArray();
+            long total = 0;
+            long free = 0;
+            List<string> formats = [];
+            foreach (string letter in letters)
+            {
+                try
+                {
+                    DriveInfo info = new(letter);
+                    if (info.IsReady)
+                    {
+                        total += info.TotalSize;
+                        free += info.AvailableFreeSpace;
+                        formats.Add(info.DriveFormat);
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            if (!_diskModels.TryGetValue(index, out string? model))
+            {
+                model = NativeMethods.QueryDiskModel(index);
+                _diskModels[index] = model;
+            }
+
+            double idle = fastFirstPaint ? 100 : ReadCounter(_diskActiveCounters, "% Idle Time", instance, primeValue: 100);
+            raw.Add(new RawDisk(
+                index,
+                letters,
+                model,
+                formats.Distinct().ToArray(),
+                Math.Clamp(100 - idle, 0, 100),
+                fastFirstPaint ? 0 : ReadCounter(_diskReadCounters, "Disk Read Bytes/sec", instance),
+                fastFirstPaint ? 0 : ReadCounter(_diskWriteCounters, "Disk Write Bytes/sec", instance),
+                total,
+                free));
         }
 
-        return disks.ToArray();
+        RefreshPoolMappingIfDue(raw);
+        Dictionary<int, string> memberPools = _poolMemberDiskToLetter;
+
+        List<DiskPerformanceSample> tiles = [];
+        foreach (RawDisk disk in raw.OrderBy(disk => disk.Letters.FirstOrDefault() ?? "￿").ThenBy(disk => disk.Index))
+        {
+            if (memberPools.ContainsKey(disk.Index))
+            {
+                continue; // shown nested under its pool tile
+            }
+
+            RawDisk[] members = disk.Letters.Length == 0 || !IsPoolDisk(disk.Model)
+                ? []
+                : raw
+                    .Where(candidate => memberPools.TryGetValue(candidate.Index, out string? pool)
+                        && disk.Letters.Contains(pool, StringComparer.OrdinalIgnoreCase))
+                    .OrderBy(candidate => candidate.Index)
+                    .ToArray();
+            if (members.Length == 0)
+            {
+                tiles.Add(StandaloneSample(disk));
+                continue;
+            }
+
+            tiles.Add(new DiskPerformanceSample(
+                $"disk:{disk.Index}",
+                $"Pool ({string.Join(" ", disk.Letters)})",
+                Kind(disk),
+                members.Max(member => member.ActivePercent),
+                members.Sum(member => member.ReadBytesPerSecond),
+                members.Sum(member => member.WriteBytesPerSecond),
+                disk.TotalBytes - disk.FreeBytes,
+                disk.FreeBytes,
+                disk.TotalBytes,
+                members.Select(StandaloneSample).ToArray()));
+        }
+
+        return tiles.ToArray();
     }
 
-    private static double ReadCounter(Dictionary<string, PerformanceCounter> counters, string counterName, string instance)
+    private static DiskPerformanceSample StandaloneSample(RawDisk disk)
+    {
+        string label = disk.Letters.Length > 0 ? string.Join(" ", disk.Letters) : disk.Model;
+        return new DiskPerformanceSample(
+            $"disk:{disk.Index}",
+            label.Length > 0 ? $"Disk {disk.Index} ({label})" : $"Disk {disk.Index}",
+            Kind(disk),
+            disk.ActivePercent,
+            disk.ReadBytesPerSecond,
+            disk.WriteBytesPerSecond,
+            disk.TotalBytes - disk.FreeBytes,
+            disk.FreeBytes,
+            disk.TotalBytes);
+    }
+
+    private static string Kind(RawDisk disk)
+    {
+        string kind = disk.Model;
+        if (disk.Formats.Length > 0)
+        {
+            string fileSystems = string.Join(", ", disk.Formats);
+            kind = kind.Length > 0 ? $"{kind} ({fileSystems})" : fileSystems;
+        }
+
+        return kind;
+    }
+
+    private static bool IsPoolDisk(string model) =>
+        model.Contains("covecube", StringComparison.OrdinalIgnoreCase)
+        || model.Contains("covefs", StringComparison.OrdinalIgnoreCase);
+
+    // Pool member volumes are hidden (no drive letter) and carry a "PoolPart.*" folder at
+    // their root. Attribution to a specific pool compares top-level folder names inside the
+    // PoolPart with each pool root; requires elevation to read, degrades to flat tiles.
+    private void RefreshPoolMappingIfDue(IReadOnlyList<RawDisk> raw)
+    {
+        if (_poolMappingRefreshedAt != long.MinValue && Environment.TickCount64 - _poolMappingRefreshedAt < 60000)
+        {
+            return;
+        }
+
+        _poolMappingRefreshedAt = Environment.TickCount64;
+        try
+        {
+            _poolMemberDiskToLetter = BuildPoolMemberMap(raw
+                .Where(disk => disk.Letters.Length > 0 && IsPoolDisk(disk.Model))
+                .SelectMany(disk => disk.Letters)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray());
+        }
+        catch
+        {
+            _poolMemberDiskToLetter = [];
+        }
+    }
+
+    private static Dictionary<int, string> BuildPoolMemberMap(IReadOnlyList<string> poolLetters)
+    {
+        Dictionary<int, string> map = [];
+        if (poolLetters.Count == 0)
+        {
+            return map;
+        }
+
+        Dictionary<string, HashSet<string>> poolRootDirs = poolLetters.ToDictionary(
+            letter => letter,
+            letter => TopLevelDirectoryNames(letter + "\\"),
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (VolumeInfo volume in NativeMethods.QueryVolumes())
+        {
+            if (volume.MountPaths.Any(path => path.Length <= 3) || volume.DiskNumbers.Length == 0)
+            {
+                continue; // volumes with a drive letter are not hidden pool members
+            }
+
+            string? poolPart;
+            try
+            {
+                poolPart = Directory.EnumerateDirectories(volume.VolumeGuidPath, "PoolPart.*").FirstOrDefault();
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (poolPart is null)
+            {
+                continue;
+            }
+
+            string? pool = AttributePool(poolLetters, poolRootDirs, TopLevelDirectoryNames(poolPart));
+            if (pool is null)
+            {
+                continue;
+            }
+
+            foreach (int disk in volume.DiskNumbers)
+            {
+                map[disk] = pool;
+            }
+        }
+
+        return map;
+    }
+
+    private static string? AttributePool(
+        IReadOnlyList<string> poolLetters,
+        IReadOnlyDictionary<string, HashSet<string>> poolRootDirs,
+        HashSet<string> memberDirs)
+    {
+        if (poolLetters.Count == 1)
+        {
+            return poolLetters[0];
+        }
+
+        string? best = null;
+        int bestScore = 0;
+        bool tie = false;
+        foreach ((string letter, HashSet<string> rootDirs) in poolRootDirs)
+        {
+            int score = memberDirs.Count(rootDirs.Contains);
+            if (score > bestScore)
+            {
+                best = letter;
+                bestScore = score;
+                tie = false;
+            }
+            else if (score == bestScore && score > 0)
+            {
+                tie = true;
+            }
+        }
+
+        return tie ? null : best;
+    }
+
+    private static HashSet<string> TopLevelDirectoryNames(string root)
+    {
+        HashSet<string> names = new(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (string path in Directory.EnumerateDirectories(root))
+            {
+                string name = Path.GetFileName(path);
+                if (name.Length > 0 && name[0] != '.' && name[0] != '$'
+                    && !name.Equals("System Volume Information", StringComparison.OrdinalIgnoreCase))
+                {
+                    names.Add(name);
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return names;
+    }
+
+    private sealed record RawDisk(
+        int Index,
+        string[] Letters,
+        string Model,
+        string[] Formats,
+        double ActivePercent,
+        double ReadBytesPerSecond,
+        double WriteBytesPerSecond,
+        long TotalBytes,
+        long FreeBytes);
+
+    private string[] PhysicalDiskInstances()
+    {
+        if (_diskInstancesRefreshedAt != long.MinValue
+            && Environment.TickCount64 - _diskInstancesRefreshedAt < 15000
+            && _diskInstances.Length > 0)
+        {
+            return _diskInstances;
+        }
+
+        try
+        {
+            _diskInstances = new PerformanceCounterCategory("PhysicalDisk").GetInstanceNames()
+                .Where(instance => !instance.Equals("_Total", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+        }
+        catch
+        {
+            _diskInstances = [];
+        }
+
+        _diskInstancesRefreshedAt = Environment.TickCount64;
+        return _diskInstances;
+    }
+
+    private static double ReadCounter(Dictionary<string, PerformanceCounter> counters, string counterName, string instance, double primeValue = 0)
     {
         string key = counterName + "|" + instance;
         try
         {
             if (!counters.TryGetValue(key, out PerformanceCounter? counter))
             {
-                counter = new PerformanceCounter("LogicalDisk", counterName, instance, readOnly: true);
+                counter = new PerformanceCounter("PhysicalDisk", counterName, instance, readOnly: true);
                 _ = counter.NextValue();
                 counters[key] = counter;
-                return 0;
+                return primeValue;
             }
 
             return Math.Max(0, counter.NextValue());
         }
         catch
         {
-            return 0;
+            return primeValue;
         }
     }
 

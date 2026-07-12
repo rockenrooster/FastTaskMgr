@@ -481,6 +481,174 @@ internal static partial class NativeMethods
 
     public static bool IsVirtualizationFirmwareEnabled() => IsProcessorFeaturePresent(PfVirtFirmwareEnabled);
 
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern SafeNativeHandle CreateFile(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DeviceIoControl(
+        SafeNativeHandle hDevice,
+        uint dwIoControlCode,
+        IntPtr lpInBuffer,
+        int nInBufferSize,
+        IntPtr lpOutBuffer,
+        int nOutBufferSize,
+        out int lpBytesReturned,
+        IntPtr lpOverlapped);
+
+    /// <summary>Reads the vendor/product string of a physical disk. Works without elevation
+    /// because the device is opened with no access rights (metadata queries only).</summary>
+    public static string QueryDiskModel(int diskIndex)
+    {
+        const uint fileShareReadWrite = 0x3;
+        const uint openExisting = 3;
+        const uint ioctlStorageQueryProperty = 0x2D1400;
+
+        using SafeNativeHandle device = CreateFile($@"\\.\PhysicalDrive{diskIndex}", 0, fileShareReadWrite, IntPtr.Zero, openExisting, 0, IntPtr.Zero);
+        if (device.IsInvalid)
+        {
+            return "";
+        }
+
+        const int queryLength = 12; // STORAGE_PROPERTY_QUERY: PropertyId=StorageDeviceProperty(0), QueryType=Standard(0)
+        const int outputLength = 1024;
+        IntPtr query = Marshal.AllocHGlobal(queryLength);
+        IntPtr output = Marshal.AllocHGlobal(outputLength);
+        try
+        {
+            for (int offset = 0; offset < queryLength; offset += 4)
+            {
+                Marshal.WriteInt32(query, offset, 0);
+            }
+
+            if (!DeviceIoControl(device, ioctlStorageQueryProperty, query, queryLength, output, outputLength, out int returned, IntPtr.Zero) || returned < 36)
+            {
+                return "";
+            }
+
+            // STORAGE_DEVICE_DESCRIPTOR: string fields are ANSI, located by byte offsets at
+            // fixed positions 12 (vendor) and 16 (product).
+            string vendor = AnsiStringAtOffset(output, Marshal.ReadInt32(output, 12), returned);
+            string product = AnsiStringAtOffset(output, Marshal.ReadInt32(output, 16), returned);
+            // Descriptors pad with spaces/underscores (e.g. "CoveFsDisk_____"); normalize.
+            return string.Join(' ', $"{vendor} {product}".Split([' ', '_'], StringSplitOptions.RemoveEmptyEntries));
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(query);
+            Marshal.FreeHGlobal(output);
+        }
+    }
+
+    private static string AnsiStringAtOffset(IntPtr buffer, int offset, int length)
+    {
+        if (offset <= 0 || offset >= length)
+        {
+            return "";
+        }
+
+        return (Marshal.PtrToStringAnsi(IntPtr.Add(buffer, offset)) ?? "").Trim();
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr FindFirstVolume(StringBuilder lpszVolumeName, int cchBufferLength);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool FindNextVolume(IntPtr hFindVolume, StringBuilder lpszVolumeName, int cchBufferLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FindVolumeClose(IntPtr hFindVolume);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool GetVolumePathNamesForVolumeName(
+        string lpszVolumeName,
+        char[] lpszVolumePathNames,
+        int cchBufferLength,
+        out int lpcchReturnLength);
+
+    public static List<VolumeInfo> QueryVolumes()
+    {
+        List<VolumeInfo> volumes = [];
+        StringBuilder name = new(260);
+        IntPtr find = FindFirstVolume(name, name.Capacity);
+        if (find == new IntPtr(-1))
+        {
+            return volumes;
+        }
+
+        try
+        {
+            do
+            {
+                string volumePath = name.ToString();
+                volumes.Add(new VolumeInfo(volumePath, QueryVolumeMountPaths(volumePath), QueryVolumeDiskNumbers(volumePath)));
+            }
+            while (FindNextVolume(find, name, name.Capacity));
+        }
+        finally
+        {
+            _ = FindVolumeClose(find);
+        }
+
+        return volumes;
+    }
+
+    private static string[] QueryVolumeMountPaths(string volumeGuidPath)
+    {
+        char[] buffer = new char[1024];
+        if (!GetVolumePathNamesForVolumeName(volumeGuidPath, buffer, buffer.Length, out int length) || length <= 1)
+        {
+            return [];
+        }
+
+        return new string(buffer, 0, length).Split('\0', StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    private static int[] QueryVolumeDiskNumbers(string volumeGuidPath)
+    {
+        const uint fileShareReadWrite = 0x3;
+        const uint openExisting = 3;
+        const uint ioctlVolumeGetVolumeDiskExtents = 0x560000;
+        const int maxExtents = 16;
+        const int headerLength = 8;
+        const int extentLength = 24;
+
+        using SafeNativeHandle volume = CreateFile(volumeGuidPath.TrimEnd('\\'), 0, fileShareReadWrite, IntPtr.Zero, openExisting, 0, IntPtr.Zero);
+        if (volume.IsInvalid)
+        {
+            return [];
+        }
+
+        int bufferLength = headerLength + maxExtents * extentLength;
+        IntPtr buffer = Marshal.AllocHGlobal(bufferLength);
+        try
+        {
+            if (!DeviceIoControl(volume, ioctlVolumeGetVolumeDiskExtents, IntPtr.Zero, 0, buffer, bufferLength, out int returned, IntPtr.Zero) || returned < headerLength)
+            {
+                return [];
+            }
+
+            int count = Math.Clamp(Marshal.ReadInt32(buffer, 0), 0, maxExtents);
+            int[] disks = new int[count];
+            for (int index = 0; index < count; index++)
+            {
+                disks[index] = Marshal.ReadInt32(buffer, headerLength + index * extentLength);
+            }
+
+            return disks.Distinct().ToArray();
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
     public static byte[] QueryRawSmbiosData()
     {
         uint size = GetSystemFirmwareTable(RawSmbiosProvider, 0, IntPtr.Zero, 0);
@@ -691,6 +859,8 @@ internal struct ServiceDescription
 {
     public IntPtr lpDescription;
 }
+
+internal sealed record VolumeInfo(string VolumeGuidPath, string[] MountPaths, int[] DiskNumbers);
 
 [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
 internal struct QueryServiceConfigInfo

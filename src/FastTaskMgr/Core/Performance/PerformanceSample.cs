@@ -36,7 +36,8 @@ internal sealed record DiskPerformanceSample(
     double WriteBytesPerSecond,
     long UsedBytes,
     long FreeBytes,
-    long TotalBytes);
+    long TotalBytes,
+    IReadOnlyList<DiskPerformanceSample>? Members = null);
 
 internal sealed record NetworkPerformanceSample(
     string Key,

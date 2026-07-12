@@ -6,6 +6,12 @@ All notable changes to FastTaskMgr are documented here.
 
 - Add upcoming user-visible changes here before tagging a release.
 
+## 0.1.0.40 - 2026-07-11
+
+### Fixed
+- Disk activity now tracks physical disks, with disk models and hosted drive letters in the tile names. Fixes zero activity for virtual volumes such as StableBit DrivePool, whose I/O is only visible on the underlying member disks.
+- StableBit DrivePool member disks are grouped under their pool's tile: the sidebar shows one tile per pool with combined activity (busiest member) and summed read/write, and the detail pane shows a graph plus live stats for each member disk.
+
 ## 0.1.0.38 - 2026-07-09
 
 ### Added

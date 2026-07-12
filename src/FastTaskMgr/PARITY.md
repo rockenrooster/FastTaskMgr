@@ -35,7 +35,7 @@ Target: Windows 11 Task Manager behavior on Windows 11 x64. Status values track 
 | Memory usage graph | Done | GlobalMemoryStatusEx | Rolling sample window. |
 | Memory total/available | Done | GlobalMemoryStatusEx | Direct OS values. |
 | Memory committed/cached/pools | Partial | GetPerformanceInfo | Commit/cache shown; pool details not shown yet. |
-| Disk performance pages | Partial | DriveInfo + PDH counters candidate | Capacity/free space and sidebar tiles are shown; active time and throughput are not implemented yet. |
+| Disk performance pages | Done | PhysicalDisk PDH counters + IOCTL_STORAGE_QUERY_PROPERTY | Physical disks: active time (100 - idle), read/write throughput, drive letters, disk model; capacity/free for lettered volumes. DrivePool member disks (PoolPart volumes) group under their pool's tile with per-member detail graphs. |
 | Network adapter pages | Partial | NetworkInterface byte deltas | Sidebar/detail throughput shown; exact Task Manager adapter details are not complete. |
 | GPU performance pages | Not possible yet | PDH GPU counters candidate | Not implemented in first pass. |
 | Update speed | Done | App setting + sampler interval | Paused/low/normal/high. |
