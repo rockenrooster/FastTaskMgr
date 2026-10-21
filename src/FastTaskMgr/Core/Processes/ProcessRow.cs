@@ -18,4 +18,5 @@ internal sealed record ProcessRow(
     string Company,
     string CommandLine,
     string Priority,
-    string Affinity);
+    string Affinity,
+    long CreateTime);

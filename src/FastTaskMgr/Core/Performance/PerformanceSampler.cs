@@ -10,14 +10,44 @@ namespace FastTaskMgr.Core.Performance;
 
 internal sealed class PerformanceSampler : IDisposable
 {
+    // Volume layout, capacity and the adapter list change rarely but are the most expensive
+    // parts of a sample (several file-system calls per drive letter, and a full adapter
+    // enumeration that costs milliseconds on machines with many virtual adapters). They refresh
+    // on these intervals (adapters also on network change events); activity stays per tick.
+    private const long DiskInventoryRefreshMs = 10_000;
+    private const long NetworkAdapterRefreshMs = 15_000;
+    private static readonly string[] HiddenAdapterHints =
+    [
+        "vpn",
+        "tap",
+        "tunnel",
+        "wintun",
+        "wireguard",
+        "tailscale",
+        "zerotier",
+        "docker",
+        "bluetooth",
+        "loopback"
+    ];
+
     private readonly Lock _lock = new();
     private readonly CpuInfo _cpuInfo = ReadCpuInfo();
     private readonly MemorySpec _memorySpec = ReadMemorySpec();
     private readonly GpuInfo _gpuInfo = ReadGpuInfo();
+    private readonly GpuEngineTotals _gpuEngines = new();
     private readonly Dictionary<int, string> _diskModels = [];
+    private Dictionary<int, DiskInventory> _diskInventory = [];
+    private long _diskInventoryRefreshedAt = long.MinValue;
     private Dictionary<int, string> _poolMemberDiskToLetter = [];
     private long _poolMappingRefreshedAt = long.MinValue;
     private readonly Dictionary<string, (long sent, long received, DateTime time)> _lastNetworkBytes = [];
+    private NetworkAdapter[] _networkAdapters = [];
+    private long _networkAdaptersRefreshedAt = long.MinValue;
+    private volatile bool _networkAdaptersChanged;
+    private readonly NetworkAddressChangedEventHandler _onNetworkAddressChanged;
+    private readonly NetworkAvailabilityChangedEventHandler _onNetworkAvailabilityChanged;
+    private bool _networkChangeSubscribed;
+    private bool _disposed;
     private PdhQuery? _pdh;
     private bool _pdhInitialized;
     private IntPtr _diskIdleCounter;
@@ -33,6 +63,12 @@ internal sealed class PerformanceSampler : IDisposable
     private ulong _lastKernel;
     private ulong _lastUser;
 
+    public PerformanceSampler()
+    {
+        _onNetworkAddressChanged = (_, _) => _networkAdaptersChanged = true;
+        _onNetworkAvailabilityChanged = (_, _) => _networkAdaptersChanged = true;
+    }
+
     /// <summary>Last completed sample; lets the Performance page paint instantly on open.</summary>
     public PerformanceSample? LastSample => _lastSample;
 
@@ -40,6 +76,7 @@ internal sealed class PerformanceSampler : IDisposable
     {
         lock (_lock)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             bool collected = CollectPdh(fastFirstPaint);
             double cpuPercent = SampleCpu();
             double[] corePercents = SampleCpuCores();
@@ -168,50 +205,12 @@ internal sealed class PerformanceSampler : IDisposable
         Dictionary<int, double> idleByDisk = ReadDiskValues(collected, _diskIdleCounter);
         Dictionary<int, double> readByDisk = ReadDiskValues(collected, _diskReadCounter);
         Dictionary<int, double> writeByDisk = ReadDiskValues(collected, _diskWriteCounter);
-
-        Dictionary<int, List<string>> lettersByDisk = [];
-        foreach (VolumeInfo volume in NativeMethods.QueryVolumes())
-        {
-            string? letter = volume.MountPaths.FirstOrDefault(path => path.Length == 3 && path[1] == ':');
-            foreach (int disk in volume.DiskNumbers)
-            {
-                if (!lettersByDisk.TryGetValue(disk, out List<string>? letters))
-                {
-                    letters = [];
-                    lettersByDisk[disk] = letters;
-                }
-
-                if (letter is not null)
-                {
-                    letters.Add(letter[..2]);
-                }
-            }
-        }
+        RefreshDiskInventoryIfDue();
 
         List<RawDisk> raw = [];
-        foreach (int index in lettersByDisk.Keys.Union(idleByDisk.Keys).OrderBy(index => index))
+        foreach (int index in _diskInventory.Keys.Union(idleByDisk.Keys).OrderBy(index => index))
         {
-            string[] letters = lettersByDisk.TryGetValue(index, out List<string>? found) ? found.Order().ToArray() : [];
-            long total = 0;
-            long free = 0;
-            List<string> formats = [];
-            foreach (string letter in letters)
-            {
-                try
-                {
-                    DriveInfo info = new(letter);
-                    if (info.IsReady)
-                    {
-                        total += info.TotalSize;
-                        free += info.AvailableFreeSpace;
-                        formats.Add(info.DriveFormat);
-                    }
-                }
-                catch
-                {
-                }
-            }
-
+            DiskInventory inventory = _diskInventory.GetValueOrDefault(index) ?? DiskInventory.Empty;
             if (!_diskModels.TryGetValue(index, out string? model))
             {
                 model = NativeMethods.QueryDiskModel(index);
@@ -221,14 +220,14 @@ internal sealed class PerformanceSampler : IDisposable
             double idle = idleByDisk.TryGetValue(index, out double idleValue) ? idleValue : 100;
             raw.Add(new RawDisk(
                 index,
-                letters,
+                inventory.Letters,
                 model,
-                formats.Distinct().ToArray(),
+                inventory.Formats,
                 Math.Clamp(100 - idle, 0, 100),
                 readByDisk.GetValueOrDefault(index),
                 writeByDisk.GetValueOrDefault(index),
-                total,
-                free));
+                inventory.TotalBytes,
+                inventory.FreeBytes));
         }
 
         RefreshPoolMappingIfDue(raw);
@@ -269,6 +268,65 @@ internal sealed class PerformanceSampler : IDisposable
         }
 
         return tiles.ToArray();
+    }
+
+    // Letters, file systems and capacity per physical disk, from the volume table.
+    private void RefreshDiskInventoryIfDue()
+    {
+        long now = Environment.TickCount64;
+        if (_diskInventoryRefreshedAt != long.MinValue && now - _diskInventoryRefreshedAt < DiskInventoryRefreshMs)
+        {
+            return;
+        }
+
+        _diskInventoryRefreshedAt = now;
+        Dictionary<int, List<string>> lettersByDisk = [];
+        foreach (VolumeInfo volume in NativeMethods.QueryVolumes())
+        {
+            string? letter = volume.MountPaths.FirstOrDefault(path => path.Length == 3 && path[1] == ':');
+            foreach (int disk in volume.DiskNumbers)
+            {
+                if (!lettersByDisk.TryGetValue(disk, out List<string>? letters))
+                {
+                    letters = [];
+                    lettersByDisk[disk] = letters;
+                }
+
+                if (letter is not null)
+                {
+                    letters.Add(letter[..2]);
+                }
+            }
+        }
+
+        Dictionary<int, DiskInventory> inventory = [];
+        foreach ((int index, List<string> found) in lettersByDisk)
+        {
+            string[] letters = found.Order().ToArray();
+            long total = 0;
+            long free = 0;
+            List<string> formats = [];
+            foreach (string letter in letters)
+            {
+                try
+                {
+                    DriveInfo info = new(letter);
+                    if (info.IsReady)
+                    {
+                        total += info.TotalSize;
+                        free += info.AvailableFreeSpace;
+                        formats.Add(info.DriveFormat);
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            inventory[index] = new DiskInventory(letters, formats.Distinct().ToArray(), total, free);
+        }
+
+        _diskInventory = inventory;
     }
 
     private static DiskPerformanceSample StandaloneSample(RawDisk disk)
@@ -430,6 +488,13 @@ internal sealed class PerformanceSampler : IDisposable
         return names;
     }
 
+    private sealed record DiskInventory(string[] Letters, string[] Formats, long TotalBytes, long FreeBytes)
+    {
+        public static readonly DiskInventory Empty = new([], [], 0, 0);
+    }
+
+    private sealed record NetworkAdapter(NetworkInterface Interface, string Key, string IpAddress);
+
     private sealed record RawDisk(
         int Index,
         string[] Letters,
@@ -450,31 +515,81 @@ internal sealed class PerformanceSampler : IDisposable
             return values;
         }
 
-        foreach ((string instance, double value) in _pdh.ReadArray(counter))
+        _pdh.VisitArray(counter, (instance, value) =>
         {
             int cut = instance.IndexOf(' ');
-            string indexToken = cut < 0 ? instance : instance[..cut];
-            if (int.TryParse(indexToken, out int index))
+            if (int.TryParse(cut < 0 ? instance : instance[..cut], out int index))
             {
                 values[index] = Math.Max(0, value);
             }
-        }
+        });
 
         return values;
     }
 
-    private NetworkPerformanceSample[] SampleNetworks()
+    private void RefreshNetworkAdaptersIfDue()
     {
-        DateTime now = DateTime.UtcNow;
-        List<NetworkPerformanceSample> networks = [];
-        foreach (NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces())
+        // Subscribed on first use (always a background sample): the first subscription
+        // initializes Winsock, which should not land on the UI thread via the constructor.
+        if (!_networkChangeSubscribed)
+        {
+            _networkChangeSubscribed = true;
+            try
+            {
+                NetworkChange.NetworkAddressChanged += _onNetworkAddressChanged;
+                NetworkChange.NetworkAvailabilityChanged += _onNetworkAvailabilityChanged;
+            }
+            catch
+            {
+                // Without change notifications the adapter list still refreshes on its interval.
+            }
+        }
+
+        long now = Environment.TickCount64;
+        if (!_networkAdaptersChanged
+            && _networkAdaptersRefreshedAt != long.MinValue
+            && now - _networkAdaptersRefreshedAt < NetworkAdapterRefreshMs)
+        {
+            return;
+        }
+
+        _networkAdaptersChanged = false;
+        _networkAdaptersRefreshedAt = now;
+        NetworkInterface[] all;
+        try
+        {
+            all = NetworkInterface.GetAllNetworkInterfaces();
+        }
+        catch
+        {
+            return; // keep the previous list
+        }
+
+        List<NetworkAdapter> visible = [];
+        foreach (NetworkInterface adapter in all)
         {
             string ipAddress = IpAddress(adapter);
-            if (!IsVisibleNetworkAdapter(adapter, ipAddress))
+            if (IsVisibleNetworkAdapter(adapter, ipAddress))
             {
-                continue;
+                visible.Add(new NetworkAdapter(adapter, $"net:{adapter.Id}", ipAddress));
             }
+        }
 
+        _networkAdapters = visible.ToArray();
+        foreach (string key in _lastNetworkBytes.Keys.Where(key => !visible.Any(adapter => adapter.Key == key)).ToArray())
+        {
+            _lastNetworkBytes.Remove(key);
+        }
+    }
+
+    private NetworkPerformanceSample[] SampleNetworks()
+    {
+        RefreshNetworkAdaptersIfDue();
+        DateTime now = DateTime.UtcNow;
+        List<NetworkPerformanceSample> networks = new(_networkAdapters.Length);
+        foreach ((NetworkInterface adapter, string key, string ipAddress) in _networkAdapters)
+        {
+            // Byte counters are re-read per tick (GetIfEntry2); only the adapter list is cached.
             IPv4InterfaceStatistics stats;
             try
             {
@@ -482,10 +597,10 @@ internal sealed class PerformanceSampler : IDisposable
             }
             catch
             {
+                _networkAdaptersChanged = true; // adapter removed; re-enumerate on the next tick
                 continue;
             }
 
-            string key = $"net:{adapter.Id}";
             double elapsed = 0;
             long sentDelta = 0;
             long receivedDelta = 0;
@@ -518,22 +633,20 @@ internal sealed class PerformanceSampler : IDisposable
 
     private GpuPerformanceSample[] SampleGpus()
     {
-        List<(string Instance, double Value)> engines = _pdh?.ReadArray(_gpuUtilCounter) ?? [];
-        if (engines.Count == 0 && _gpuInfo == GpuInfo.Unknown)
+        _gpuEngines.Clear();
+        _pdh?.VisitArray(_gpuUtilCounter, _gpuEngines.Add);
+        if (_gpuEngines.InstanceCount == 0 && _gpuInfo == GpuInfo.Unknown)
         {
             return [];
         }
 
-        double utilization = BusiestGpuEnginePercent(engines
-            .Where(engine => !engine.Instance.Equals("_Total", StringComparison.OrdinalIgnoreCase))
-            .Select(engine => (engine.Instance, engine.Value)));
         return
         [
             new GpuPerformanceSample(
                 "gpu:0",
                 _gpuInfo.Name,
-                engines.Count > 0 ? "Windows GPU counters" : "Adapter info only",
-                Math.Clamp(utilization, 0, 100),
+                _gpuEngines.InstanceCount > 0 ? "Windows GPU counters" : "Adapter info only",
+                Math.Clamp(_gpuEngines.Busiest, 0, 100),
                 ReadGpuMemoryBytes(_gpuDedicatedCounter),
                 _gpuInfo.DedicatedMemoryTotalBytes,
                 ReadGpuMemoryBytes(_gpuSharedCounter),
@@ -543,21 +656,25 @@ internal sealed class PerformanceSampler : IDisposable
 
     private long ReadGpuMemoryBytes(IntPtr counter)
     {
-        List<(string Instance, double Value)> values = _pdh?.ReadArray(counter) ?? [];
         double total = 0;
-        foreach ((string instance, double value) in values)
+        bool hasTotal = false;
+        _pdh?.VisitArray(counter, (instance, value) =>
         {
+            if (hasTotal)
+            {
+                return;
+            }
+
             if (instance.Equals("_Total", StringComparison.OrdinalIgnoreCase))
             {
                 total = value;
-                break;
+                hasTotal = true;
             }
-
-            if (!instance.Contains("pid_", StringComparison.OrdinalIgnoreCase))
+            else if (!instance.Contains("pid_", StringComparison.OrdinalIgnoreCase))
             {
                 total += value;
             }
-        }
+        });
 
         return (long)Math.Min(long.MaxValue, Math.Max(0, total));
     }
@@ -575,21 +692,59 @@ internal sealed class PerformanceSampler : IDisposable
 
     internal static double BusiestGpuEnginePercent(IEnumerable<(string InstanceName, double Percent)> samples)
     {
-        Dictionary<string, double> byEngineType = new(StringComparer.OrdinalIgnoreCase);
+        GpuEngineTotals totals = new();
         foreach ((string instanceName, double percent) in samples)
         {
-            string engineType = GpuEngineType(instanceName);
-            byEngineType[engineType] = byEngineType.GetValueOrDefault(engineType) + Math.Max(0, percent);
+            totals.Add(instanceName, percent);
         }
 
-        return byEngineType.Count == 0 ? 0 : byEngineType.Values.Max();
+        return totals.Busiest;
     }
 
-    private static string GpuEngineType(string instanceName)
+    /// <summary>
+    /// Sums utilization per engine type ("3D", "Copy", ...) across processes and reports the
+    /// busiest type. Works on spans so hundreds of engine instances per tick allocate nothing.
+    /// </summary>
+    private sealed class GpuEngineTotals
     {
-        const string marker = "engtype_";
-        int start = instanceName.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-        return start < 0 ? instanceName : instanceName[(start + marker.Length)..];
+        private readonly Dictionary<string, double> _byType = new(StringComparer.OrdinalIgnoreCase);
+
+        public int InstanceCount { get; private set; }
+
+        public double Busiest
+        {
+            get
+            {
+                double busiest = 0;
+                foreach (double value in _byType.Values)
+                {
+                    busiest = Math.Max(busiest, value);
+                }
+
+                return busiest;
+            }
+        }
+
+        public void Clear()
+        {
+            _byType.Clear();
+            InstanceCount = 0;
+        }
+
+        public void Add(ReadOnlySpan<char> instance, double percent)
+        {
+            InstanceCount++;
+            if (instance.Equals("_Total", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            const string marker = "engtype_";
+            int start = instance.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            ReadOnlySpan<char> engineType = start < 0 ? instance : instance[(start + marker.Length)..];
+            Dictionary<string, double>.AlternateLookup<ReadOnlySpan<char>> lookup = _byType.GetAlternateLookup<ReadOnlySpan<char>>();
+            lookup[engineType] = (lookup.TryGetValue(engineType, out double current) ? current : 0) + Math.Max(0, percent);
+        }
     }
 
     private static bool IsVisibleNetworkAdapter(NetworkInterface adapter, string ipAddress)
@@ -615,21 +770,7 @@ internal sealed class PerformanceSampler : IDisposable
         }
 
         string text = (adapter.Name + " " + adapter.Description).ToLowerInvariant();
-        string[] hiddenHints =
-        [
-            "vpn",
-            "tap",
-            "tunnel",
-            "wintun",
-            "wireguard",
-            "tailscale",
-            "zerotier",
-            "docker",
-            "bluetooth",
-            "loopback"
-        ];
-
-        return !hiddenHints.Any(text.Contains);
+        return !HiddenAdapterHints.Any(text.Contains);
     }
 
     private static GpuInfo ReadGpuInfo()
@@ -754,7 +895,7 @@ internal sealed class PerformanceSampler : IDisposable
             maxMhz / 1000d,
             Math.Max(1, sockets),
             Math.Max(1, cores),
-            Environment.ProcessorCount,
+            NativeMethods.LogicalProcessorCount,
             NativeMethods.IsVirtualizationFirmwareEnabled(),
             l1,
             l2,
@@ -860,7 +1001,27 @@ internal sealed class PerformanceSampler : IDisposable
     private static uint ReadUInt32(byte[] raw, int offset, int length, int fieldOffset) =>
         fieldOffset + 4 <= length ? BitConverter.ToUInt32(raw, offset + fieldOffset) : 0;
 
-    public void Dispose() => _pdh?.Dispose();
+    // Waits for an in-flight background sample before closing the PDH query under it.
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            _disposed = true;
+            _pdh?.Dispose();
+            _pdh = null;
+            if (_networkChangeSubscribed)
+            {
+                try
+                {
+                    NetworkChange.NetworkAddressChanged -= _onNetworkAddressChanged;
+                    NetworkChange.NetworkAvailabilityChanged -= _onNetworkAvailabilityChanged;
+                }
+                catch
+                {
+                }
+            }
+        }
+    }
 
     private sealed record MemorySpec(int SpeedMtps, int SlotsUsed, int SlotsTotal);
 

@@ -24,14 +24,20 @@ internal sealed class StartupPage : PageBase
 
         Controls.Add(_table);
         Controls.Add(BuildToolbar());
+        SetRefreshAction(RefreshRowsAsync, autoRefresh: false);
     }
 
     public override string Title => "Startup apps";
 
-    public override void OnShow() => RefreshRows();
+    protected override async void OnShow() => await RefreshAsync();
 
     public override void ApplySearch(string searchText)
     {
+        if (_filter == searchText)
+        {
+            return;
+        }
+
         _filter = searchText;
         ApplyFilter();
     }
@@ -51,7 +57,7 @@ internal sealed class StartupPage : PageBase
         AddButton(toolbar, "Open location", OpenSelectedLocation);
         AddButton(toolbar, "Properties", ShowSelectedProperties);
         AddButton(toolbar, "Search online", SearchSelectedOnline);
-        AddButton(toolbar, "Refresh", RefreshRows);
+        AddButton(toolbar, "Refresh", async () => await RequestRefreshAsync());
         return toolbar;
     }
 
@@ -62,10 +68,15 @@ internal sealed class StartupPage : PageBase
         panel.Controls.Add(button);
     }
 
-    private void RefreshRows()
+    // Publisher lookups read version resources from disk, so keep them off the UI thread.
+    private async Task RefreshRowsAsync()
     {
-        _rows = State.Startup.ListStartupItems();
-        ApplyFilter();
+        IReadOnlyList<StartupItem> rows = await Task.Run(State.Startup.ListStartupItems);
+        if (!IsDisposed)
+        {
+            _rows = rows;
+            ApplyFilter();
+        }
     }
 
     private void ApplyFilter()
@@ -94,7 +105,7 @@ internal sealed class StartupPage : PageBase
         try
         {
             State.Startup.SetEnabled(item, enabled);
-            RefreshRows();
+            _ = RequestRefreshAsync();
         }
         catch (Exception ex)
         {

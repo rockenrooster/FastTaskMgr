@@ -69,7 +69,7 @@ Target: Windows 11 Task Manager behavior on Windows 11 x64. Status values track 
 | Minimize/hide behavior | Done | WinForms window state + NotifyIcon | Hide-on-minimize with tray icon restore and exit. |
 | Theme light/dark/system | Partial | WinForms colors + registry system setting | Lightweight theme only. |
 | Confirm before ending process | Done | Stored setting | On by default. |
-| Remember layout | Done | Settings JSON | Size, position, start page, update speed. |
+| Remember layout | Done | Settings JSON | Size, position (only while still on a connected monitor), maximized state, start page, update speed. |
 | Elevation for admin-only actions | Partial | runas candidate | Access denied is handled; relaunch elevation is not implemented yet. |
 | Protected/critical process handling | Partial | Critical name warning + access checks | No kernel driver; stronger critical process coverage is still needed. |
 | Single-file publish | Done | `dotnet publish` framework-dependent single-file win-x64 | Main distribution path; requires installed .NET Desktop runtime. |

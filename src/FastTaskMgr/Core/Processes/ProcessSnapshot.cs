@@ -2,10 +2,11 @@ using System.Runtime.InteropServices;
 
 namespace FastTaskMgr.Core.Processes;
 
-internal sealed record SystemProcessEntry(
+/// <summary>One process from the snapshot. The image name stays in the reader's buffer
+/// (see <see cref="SystemProcessReader.ReadName"/>) so steady-state samples allocate no strings.</summary>
+internal readonly record struct SystemProcessEntry(
     int ProcessId,
     int ParentProcessId,
-    string Name,
     int SessionId,
     int ThreadCount,
     int HandleCount,
@@ -14,11 +15,14 @@ internal sealed record SystemProcessEntry(
     ulong CpuTime100ns,
     ulong IoTransferBytes,
     int BasePriority,
-    bool IsSuspended);
+    bool IsSuspended,
+    int NameOffset,
+    int NameLength);
 
 /// <summary>
 /// Reads all process rows in a single NtQuerySystemInformation(SystemProcessInformation) call.
-/// The native buffer is reused across samples; callers must serialize access.
+/// The buffer is reused across samples; callers must serialize access and consume entries
+/// (including names) before the next read.
 /// </summary>
 internal sealed class SystemProcessReader : IDisposable
 {
@@ -26,30 +30,33 @@ internal sealed class SystemProcessReader : IDisposable
     private const int StatusInfoLengthMismatch = unchecked((int)0xC0000004);
     private const int ThreadStateWait = 5;
     private const int ThreadWaitReasonSuspended = 5;
+    private static readonly int ProcessSize = Marshal.SizeOf<SystemProcessInformation>();
+    private static readonly int ThreadSize = Marshal.SizeOf<SystemThreadInformation>();
 
-    private IntPtr _buffer;
-    private int _bufferLength;
+    // Pinned managed buffer: entries are read with MemoryMarshal (no boxing per struct, unlike
+    // Marshal.PtrToStructure) and nothing native is left to free if a read is in flight at exit.
+    private byte[] _buffer = [];
+    private IntPtr _bufferAddress;
+    private int _dataLength;
 
-    public List<SystemProcessEntry> Read()
+    public void Read(List<SystemProcessEntry> entries)
     {
-        List<SystemProcessEntry> entries = new(256);
-        if (!FillBuffer(out int dataLength))
+        entries.Clear();
+        if (!FillBuffer())
         {
-            return entries;
+            return;
         }
 
-        int processSize = Marshal.SizeOf<SystemProcessInformation>();
-        int threadSize = Marshal.SizeOf<SystemThreadInformation>();
+        ReadOnlySpan<byte> data = _buffer.AsSpan(0, _dataLength);
         int offset = 0;
-        while (offset + processSize <= dataLength)
+        while (offset + ProcessSize <= data.Length)
         {
-            IntPtr entryPtr = IntPtr.Add(_buffer, offset);
-            SystemProcessInformation info = Marshal.PtrToStructure<SystemProcessInformation>(entryPtr);
-            int pid = info.UniqueProcessId.ToInt32();
+            SystemProcessInformation info = MemoryMarshal.Read<SystemProcessInformation>(data[offset..]);
+            int pid = (int)info.UniqueProcessId;
+            (int nameOffset, int nameLength) = NameRange(info, data.Length);
             entries.Add(new SystemProcessEntry(
                 pid,
-                info.InheritedFromUniqueProcessId.ToInt32(),
-                ImageName(info, pid),
+                (int)info.InheritedFromUniqueProcessId,
                 (int)info.SessionId,
                 (int)info.NumberOfThreads,
                 (int)info.HandleCount,
@@ -58,7 +65,9 @@ internal sealed class SystemProcessReader : IDisposable
                 (ulong)(info.KernelTime + info.UserTime),
                 (ulong)(info.ReadTransferCount + info.WriteTransferCount),
                 info.BasePriority,
-                pid != 0 && AllThreadsSuspended(entryPtr, processSize, threadSize, info.NumberOfThreads, offset, dataLength)));
+                pid != 0 && AllThreadsSuspended(data, offset + ProcessSize, info.NumberOfThreads),
+                nameOffset,
+                nameLength));
 
             if (info.NextEntryOffset == 0)
             {
@@ -67,24 +76,44 @@ internal sealed class SystemProcessReader : IDisposable
 
             offset += (int)info.NextEntryOffset;
         }
-
-        return entries;
     }
 
-    private bool FillBuffer(out int dataLength)
+    /// <summary>Materializes an entry's display name from the current snapshot.</summary>
+    public string ReadName(in SystemProcessEntry entry)
     {
-        dataLength = 0;
-        if (_buffer == IntPtr.Zero)
+        if (entry.NameLength <= 0)
+        {
+            return entry.ProcessId == 0 ? "System Idle Process" : $"PID {entry.ProcessId}";
+        }
+
+        ReadOnlySpan<char> name = MemoryMarshal.Cast<byte, char>(_buffer.AsSpan(entry.NameOffset, entry.NameLength));
+        return new string(name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name);
+    }
+
+    // The kernel stores image names inside the same buffer, after the entries.
+    private (int Offset, int Length) NameRange(in SystemProcessInformation info, int dataLength)
+    {
+        long offset = (long)info.ImageName.Buffer - (long)_bufferAddress;
+        int length = info.ImageName.Length & ~1;
+        return info.ImageName.Buffer == IntPtr.Zero || length == 0 || offset < 0 || offset + length > dataLength
+            ? (0, 0)
+            : ((int)offset, length);
+    }
+
+    private bool FillBuffer()
+    {
+        _dataLength = 0;
+        if (_buffer.Length == 0)
         {
             Grow(1024 * 1024);
         }
 
         for (int attempt = 0; attempt < 8; attempt++)
         {
-            int status = NtQuerySystemInformation(SystemProcessInformationClass, _buffer, _bufferLength, out int returnLength);
+            int status = NtQuerySystemInformation(SystemProcessInformationClass, _bufferAddress, _buffer.Length, out int returnLength);
             if (status >= 0)
             {
-                dataLength = Math.Min(returnLength, _bufferLength);
+                _dataLength = Math.Min(returnLength, _buffer.Length);
                 return true;
             }
 
@@ -93,7 +122,7 @@ internal sealed class SystemProcessReader : IDisposable
                 return false;
             }
 
-            Grow(Math.Max(_bufferLength * 2, returnLength + 64 * 1024));
+            Grow(Math.Max(_buffer.Length * 2, returnLength + 64 * 1024));
         }
 
         return false;
@@ -101,39 +130,20 @@ internal sealed class SystemProcessReader : IDisposable
 
     private void Grow(int length)
     {
-        if (_buffer != IntPtr.Zero)
-        {
-            Marshal.FreeHGlobal(_buffer);
-            _buffer = IntPtr.Zero;
-            _bufferLength = 0;
-        }
-
-        _buffer = Marshal.AllocHGlobal(length);
-        _bufferLength = length;
+        _buffer = GC.AllocateUninitializedArray<byte>(length, pinned: true);
+        _bufferAddress = Marshal.UnsafeAddrOfPinnedArrayElement(_buffer, 0);
     }
 
-    private static string ImageName(in SystemProcessInformation info, int pid)
+    private static bool AllThreadsSuspended(ReadOnlySpan<byte> data, int firstThreadOffset, uint threadCount)
     {
-        if (info.ImageName.Buffer == IntPtr.Zero || info.ImageName.Length == 0)
-        {
-            return pid == 0 ? "System Idle Process" : $"PID {pid}";
-        }
-
-        string name = Marshal.PtrToStringUni(info.ImageName.Buffer, info.ImageName.Length / 2);
-        return name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name;
-    }
-
-    private bool AllThreadsSuspended(IntPtr entryPtr, int processSize, int threadSize, uint threadCount, int entryOffset, int dataLength)
-    {
-        if (threadCount == 0 || entryOffset + processSize + (long)threadCount * threadSize > dataLength)
+        if (threadCount == 0 || firstThreadOffset + (long)threadCount * ThreadSize > data.Length)
         {
             return false;
         }
 
         for (int index = 0; index < threadCount; index++)
         {
-            SystemThreadInformation thread = Marshal.PtrToStructure<SystemThreadInformation>(
-                IntPtr.Add(entryPtr, processSize + index * threadSize));
+            SystemThreadInformation thread = MemoryMarshal.Read<SystemThreadInformation>(data[(firstThreadOffset + index * ThreadSize)..]);
             if (thread.ThreadState != ThreadStateWait || thread.WaitReason != ThreadWaitReasonSuspended)
             {
                 return false;
@@ -145,12 +155,9 @@ internal sealed class SystemProcessReader : IDisposable
 
     public void Dispose()
     {
-        if (_buffer != IntPtr.Zero)
-        {
-            Marshal.FreeHGlobal(_buffer);
-            _buffer = IntPtr.Zero;
-            _bufferLength = 0;
-        }
+        _buffer = [];
+        _bufferAddress = IntPtr.Zero;
+        _dataLength = 0;
     }
 
     [DllImport("ntdll.dll")]
@@ -226,14 +233,13 @@ internal sealed class SystemProcessReader : IDisposable
 }
 
 /// <summary>
-/// One EnumWindows pass per sample builds the "has a visible window" and "is hung" sets
-/// for every process, replacing per-process MainWindowHandle/Responding scans.
+/// One EnumWindows pass per sample finds every process with a hung top-level window,
+/// replacing per-process MainWindowHandle/Responding scans.
 /// </summary>
 internal static class WindowSnapshot
 {
-    public static (HashSet<int> WindowedPids, HashSet<int> HungPids) Query()
+    public static HashSet<int> QueryHungProcessIds()
     {
-        HashSet<int> windowed = [];
         HashSet<int> hung = [];
         _ = EnumWindows((hwnd, lparam) =>
         {
@@ -243,19 +249,15 @@ internal static class WindowSnapshot
             }
 
             _ = GetWindowThreadProcessId(hwnd, out uint pid);
-            if (pid != 0)
+            if (pid != 0 && IsHungAppWindow(hwnd))
             {
-                windowed.Add((int)pid);
-                if (IsHungAppWindow(hwnd))
-                {
-                    hung.Add((int)pid);
-                }
+                hung.Add((int)pid);
             }
 
             return true;
         }, IntPtr.Zero);
 
-        return (windowed, hung);
+        return hung;
     }
 
     private const int GwOwner = 4;

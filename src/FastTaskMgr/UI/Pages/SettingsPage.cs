@@ -97,7 +97,7 @@ internal sealed class SettingsPage : PageBase
     public override string Title => "Settings";
     public override bool UsesSearch => false;
 
-    public override void OnShow()
+    protected override void OnShow()
     {
         _defaultPage.SelectedItem = State.Settings.DefaultPage;
         _updateSpeed.SelectedItem = State.Settings.UpdateSpeed.ToString();
@@ -303,9 +303,18 @@ internal sealed class SettingsPage : PageBase
         State.Settings.AlwaysStartAsAdmin = _alwaysStartAsAdmin.Checked;
         State.Settings.ConfirmBeforeEndProcess = _confirmEnd.Checked;
         State.Settings.ConfirmBeforeEfficiencyMode = _confirmEfficiency.Checked;
-        State.SaveSettings();
-        bool integrationSaved = ApplyTaskManagerReplacement();
-        ShowSaveStatus(integrationSaved ? "Saved" : "Saved app settings; integration unchanged", integrationSaved);
+        bool settingsSaved = State.SaveSettings();
+        // Touch the HKLM key only when the choice changed: writing it needs elevation, so an
+        // unconditional write made every unelevated Save report an error.
+        bool integrationSaved = _replaceTaskManager.Checked == IsTaskManagerReplacementEnabled() || ApplyTaskManagerReplacement();
+        if (!settingsSaved)
+        {
+            ShowSaveStatus("Could not write the settings file; changes last until exit", success: false);
+        }
+        else
+        {
+            ShowSaveStatus(integrationSaved ? "Saved" : "Saved app settings; integration unchanged", integrationSaved);
+        }
         if (_alwaysStartAsAdmin.Checked && !IsAdministrator())
         {
             MessageBox.Show(this, "FastTaskMgr will request administrator rights the next time it starts.", "FastTaskMgr", MessageBoxButtons.OK, MessageBoxIcon.Information);

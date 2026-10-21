@@ -12,7 +12,6 @@ internal sealed class PerformancePage : PageBase
     private static readonly Color NetworkColor = Color.FromArgb(200, 40, 105);
     private static readonly Color GpuColor = Color.FromArgb(120, 65, 220);
 
-    private readonly System.Windows.Forms.Timer _timer = new();
     private readonly BufferedFlowLayoutPanel _sidebar = new();
     private readonly Panel _detailHost = new();
     private readonly Label _detailTitle = new();
@@ -25,13 +24,11 @@ internal sealed class PerformancePage : PageBase
     private TableLayoutPanel? _memberGrid;
     private IReadOnlyList<PerfItem> _currentItems = [];
     private IReadOnlyList<StatItem> _currentStats = [];
-    private string? _renderedDetailKey;
     private GraphControl? _detailGraph;
     private TableLayoutPanel? _cpuGrid;
     private int _cpuGridColumns;
     private string _selectedKey = "cpu";
     private PerformanceSample? _latest;
-    private bool _refreshing;
 
     public PerformancePage(AppState state)
         : base(state)
@@ -100,35 +97,20 @@ internal sealed class PerformancePage : PageBase
         _detailStats.Resize += (_, _) => ReflowStats();
         detail.Controls.Add(_detailStats, 0, 2);
 
-        _timer.Tick += async (_, _) => await RefreshSampleAsync();
-        State.SettingsChanged += (_, _) => ConfigureTimer();
+        SetRefreshAction(RefreshSampleAsync, autoRefresh: true);
     }
 
     public override string Title => "Performance";
     public override bool UsesSearch => false;
 
-    public override async void OnShow()
+    protected override async void OnShow()
     {
-        ConfigureTimer();
         if (_latest is null && State.Performance.LastSample is { } cached)
         {
             RenderSample(cached); // paint instantly from the warm-up sample
         }
 
-        await RefreshSampleAsync();
-    }
-
-    public override void OnHide() => _timer.Stop();
-
-    private void ConfigureTimer()
-    {
-        int interval = State.Settings.UpdateSpeed.ToMilliseconds();
-        _timer.Stop();
-        if (interval > 0)
-        {
-            _timer.Interval = interval;
-            _timer.Start();
-        }
+        await RefreshAsync();
     }
 
     private static void ConfigureSplitter(SplitContainer split)
@@ -147,24 +129,11 @@ internal sealed class PerformancePage : PageBase
 
     private async Task RefreshSampleAsync()
     {
-        if (_refreshing || IsDisposed || (ModifierKeys & Keys.Control) == Keys.Control)
+        bool fastFirstPaint = _latest is null && State.Settings.UpdateSpeed != UpdateSpeed.Paused;
+        PerformanceSample sample = await Task.Run(() => State.Performance.Sample(fastFirstPaint));
+        if (!IsDisposed)
         {
-            return;
-        }
-
-        _refreshing = true;
-        try
-        {
-            bool fastFirstPaint = _latest is null && State.Settings.UpdateSpeed != UpdateSpeed.Paused;
-            PerformanceSample sample = await Task.Run(() => State.Performance.Sample(fastFirstPaint));
-            if (!IsDisposed)
-            {
-                RenderSample(sample);
-            }
-        }
-        finally
-        {
-            _refreshing = false;
+            RenderSample(sample);
         }
     }
 
@@ -317,26 +286,21 @@ internal sealed class PerformancePage : PageBase
                 new("L2 cache", FormatUtil.Bytes(_latest.CpuInfo.L2CacheBytes)),
                 new("L3 cache", FormatUtil.Bytes(_latest.CpuInfo.L3CacheBytes))
             ]);
-            _renderedDetailKey = item.Key;
             return;
         }
 
         DiskPerformanceSample? diskSample = _latest.Disks.FirstOrDefault(disk => disk.Key == item.Key);
         if (diskSample?.Members is { Count: > 0 })
         {
-            RenderDiskMemberGraphs(item, diskSample);
+            RenderDiskMemberGraphs(diskSample);
             SetStats(StatsFor(item));
-            _renderedDetailKey = item.Key;
             return;
         }
 
-        if (_renderedDetailKey != item.Key || _detailGraph is null || !_detailHost.Controls.Contains(_detailGraph))
+        // One graph serves every single-series item; switching items only restyles it.
+        if (_detailGraph is null || !_detailHost.Controls.Contains(_detailGraph))
         {
-            _detailHost.Controls.Clear();
-            _cpuCoreGraphs.Clear();
-            _cpuGrid = null;
-            _diskMemberGraphs.Clear();
-            _memberGrid = null;
+            ClearDetailHost();
             _detailGraph = new GraphControl { Dock = DockStyle.Fill };
             _detailHost.Controls.Add(_detailGraph);
         }
@@ -346,7 +310,22 @@ internal sealed class PerformancePage : PageBase
         _detailGraph.FillColor = Color.FromArgb(48, item.Color);
         _detailGraph.SetSamples(GetHistory(item.Key));
         SetStats(StatsFor(item));
-        _renderedDetailKey = item.Key;
+    }
+
+    // Controls.Clear() only detaches children and keeps their window handles alive, so every
+    // tile switch used to leak a graph (or a whole per-core grid). Dispose what was hosted.
+    private void ClearDetailHost()
+    {
+        while (_detailHost.Controls.Count > 0)
+        {
+            _detailHost.Controls[0].Dispose();
+        }
+
+        _detailGraph = null;
+        _cpuGrid = null;
+        _cpuCoreGraphs.Clear();
+        _memberGrid = null;
+        _diskMemberGraphs.Clear();
     }
 
     private void RenderCpuCoreGraphs(PerformanceSample sample)
@@ -355,13 +334,9 @@ internal sealed class PerformancePage : PageBase
         int columns = CpuGridColumns(count);
         int rows = (int)Math.Ceiling(count / (double)columns);
 
-        if (_renderedDetailKey != "cpu" || _cpuGrid is null || _cpuCoreGraphs.Count != count || _cpuGridColumns != columns)
+        if (_cpuGrid is null || !_detailHost.Controls.Contains(_cpuGrid) || _cpuCoreGraphs.Count != count || _cpuGridColumns != columns)
         {
-            _detailHost.Controls.Clear();
-            _detailGraph = null;
-            _diskMemberGraphs.Clear();
-            _memberGrid = null;
-            _cpuCoreGraphs.Clear();
+            ClearDetailHost();
             _cpuGridColumns = columns;
             _cpuGrid = new TableLayoutPanel
             {
@@ -404,24 +379,20 @@ internal sealed class PerformancePage : PageBase
         }
     }
 
-    private void RenderDiskMemberGraphs(PerfItem item, DiskPerformanceSample disk)
+    private void RenderDiskMemberGraphs(DiskPerformanceSample disk)
     {
         IReadOnlyList<DiskPerformanceSample> members = disk.Members ?? [];
         int count = Math.Max(1, members.Count);
         int columns = count <= 2 ? 1 : 2;
         int rows = (int)Math.Ceiling(count / (double)columns);
 
-        bool rebuild = _renderedDetailKey != item.Key
-            || _memberGrid is null
+        bool rebuild = _memberGrid is null
+            || !_detailHost.Controls.Contains(_memberGrid)
             || _diskMemberGraphs.Count != count
             || members.Any(member => !_diskMemberGraphs.ContainsKey(member.Key));
         if (rebuild)
         {
-            _detailHost.Controls.Clear();
-            _detailGraph = null;
-            _cpuCoreGraphs.Clear();
-            _cpuGrid = null;
-            _diskMemberGraphs.Clear();
+            ClearDetailHost();
             _memberGrid = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -683,12 +654,16 @@ internal sealed class PerformancePage : PageBase
 
     private sealed class PerfTile : UserControl
     {
-        private static readonly Color SelectedBackColor = Color.FromArgb(235, 235, 235);
-        private static readonly Color HoverBackColor = Color.FromArgb(245, 248, 252);
+        // Theme-aware so the selected tile keeps readable text in dark mode.
+        private static readonly Color LightSelectedBackColor = Color.FromArgb(204, 228, 247);
+        private static readonly Color LightHoverBackColor = Color.FromArgb(226, 238, 252);
+        private static readonly Color DarkSelectedBackColor = Color.FromArgb(40, 78, 122);
+        private static readonly Color DarkHoverBackColor = Color.FromArgb(56, 64, 76);
         private readonly Action<string> _select;
         private readonly GraphControl _graph = new() { Compact = true };
         private readonly Label _title = new();
         private readonly Label _subtitle = new();
+        private readonly Font _titleFont;
         private PerfItem? _item;
         private Color _pageBackColor;
         private bool _selected;
@@ -704,7 +679,8 @@ internal sealed class PerformancePage : PageBase
 
             _title.AutoSize = false;
             _title.AutoEllipsis = true;
-            _title.Font = new Font(Font, FontStyle.Bold);
+            _titleFont = new Font(Font, FontStyle.Bold);
+            _title.Font = _titleFont;
             _subtitle.AutoSize = false;
             _subtitle.AutoEllipsis = true;
 
@@ -768,10 +744,22 @@ internal sealed class PerformancePage : PageBase
 
         private void ApplyBackColor()
         {
-            BackColor = _selected ? SelectedBackColor : _hovered ? HoverBackColor : _pageBackColor;
+            bool dark = _pageBackColor.GetBrightness() < 0.5f;
+            BackColor = _selected ? (dark ? DarkSelectedBackColor : LightSelectedBackColor)
+                : _hovered ? (dark ? DarkHoverBackColor : LightHoverBackColor)
+                : _pageBackColor;
             _title.BackColor = BackColor;
             _subtitle.BackColor = BackColor;
             _graph.BackColor = BackColor;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing)
+            {
+                _titleFont.Dispose();
+            }
         }
     }
 
@@ -792,6 +780,7 @@ internal sealed class PerformancePage : PageBase
     {
         private readonly Label _label = new();
         private readonly Label _value = new();
+        private readonly Font _valueFont;
 
         public StatBlock()
         {
@@ -807,7 +796,8 @@ internal sealed class PerformancePage : PageBase
             _value.AutoEllipsis = true;
             _value.Location = new Point(0, 15);
             _value.Height = 21;
-            _value.Font = new Font(Font.FontFamily, 10f, FontStyle.Regular);
+            _valueFont = new Font(Font.FontFamily, 10f, FontStyle.Regular);
+            _value.Font = _valueFont;
 
             Controls.Add(_label);
             Controls.Add(_value);
@@ -826,6 +816,15 @@ internal sealed class PerformancePage : PageBase
             if (_value.Text != item.Value)
             {
                 _value.Text = item.Value;
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing)
+            {
+                _valueFont.Dispose();
             }
         }
     }

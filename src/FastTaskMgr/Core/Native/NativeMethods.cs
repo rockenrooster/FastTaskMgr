@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text;
 
 namespace FastTaskMgr.Core.Native;
@@ -11,6 +13,8 @@ internal static partial class NativeMethods
     public const uint ProcessQueryLimitedInformation = 0x1000;
     public const uint TokenQuery = 0x0008;
     public const int ErrorInsufficientBuffer = 122;
+    private const int ErrorInvalidParameter = 87;
+    private const ushort AllProcessorGroups = 0xFFFF;
 
     public const uint PriorityIdle = 0x00000040;
     public const uint PriorityBelowNormal = 0x00004000;
@@ -39,6 +43,16 @@ internal static partial class NativeMethods
     private const int SystemProcessorPerformanceInformation = 8;
     private const uint RawSmbiosProvider = 0x52534D42;
 
+    // A handful of accounts own every process; LookupAccountSid is an LSA round trip, so
+    // resolve each SID once instead of once per process.
+    private static readonly ConcurrentDictionary<string, string> AccountNamesBySid = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Logical processors across all processor groups. Environment.ProcessorCount reflects this
+    /// process's affinity mask and job limits, which would skew system-wide percentages.
+    /// </summary>
+    public static readonly int LogicalProcessorCount = QueryLogicalProcessorCount();
+
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern SafeNativeHandle OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
 
@@ -47,6 +61,12 @@ internal static partial class NativeMethods
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool TerminateProcess(SafeNativeHandle hProcess, uint uExitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetProcessTimes(SafeNativeHandle hProcess, out long creationTime, out long exitTime, out long kernelTime, out long userTime);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetActiveProcessorCount(ushort groupNumber);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint GetPriorityClass(SafeNativeHandle hProcess);
@@ -242,6 +262,40 @@ internal static partial class NativeMethods
         return !process.IsInvalid && TerminateProcess(process, 1);
     }
 
+    /// <summary>
+    /// Ends the process only if it is still the one that was sampled. PIDs are recycled quickly,
+    /// so a row that is a second old can name an unrelated process. A target that has already
+    /// exited counts as ended.
+    /// </summary>
+    public static bool TerminateProcess(int pid, long expectedCreateTime)
+    {
+        if (pid <= 0)
+        {
+            return false;
+        }
+
+        using SafeNativeHandle process = OpenProcess(ProcessTerminate | ProcessQueryLimitedInformation, false, pid);
+        if (process.IsInvalid)
+        {
+            return Marshal.GetLastWin32Error() == ErrorInvalidParameter; // no such process any more
+        }
+
+        if (expectedCreateTime != 0
+            && GetProcessTimes(process, out long createTime, out _, out _, out _)
+            && createTime != expectedCreateTime)
+        {
+            return true; // the sampled process is gone and its PID now belongs to another one
+        }
+
+        return TerminateProcess(process, 1);
+    }
+
+    private static int QueryLogicalProcessorCount()
+    {
+        uint count = GetActiveProcessorCount(AllProcessorGroups);
+        return count > 0 ? (int)count : Environment.ProcessorCount;
+    }
+
     public static string? QueryProcessUserName(SafeNativeHandle process)
     {
         if (process.IsInvalid || !OpenProcessToken(process, TokenQuery, out SafeNativeHandle token))
@@ -266,6 +320,12 @@ internal static partial class NativeMethods
                 }
 
                 TokenUser user = Marshal.PtrToStructure<TokenUser>(buffer);
+                string sid = new SecurityIdentifier(user.User.Sid).Value;
+                if (AccountNamesBySid.TryGetValue(sid, out string? cached))
+                {
+                    return cached;
+                }
+
                 StringBuilder name = new(256);
                 StringBuilder domain = new(256);
                 int nameLength = name.Capacity;
@@ -273,10 +333,12 @@ internal static partial class NativeMethods
 
                 if (!LookupAccountSid(null, user.User.Sid, name, ref nameLength, domain, ref domainLength, out _))
                 {
-                    return null;
+                    return null; // not cached: lookups can fail transiently (e.g. domain controller unreachable)
                 }
 
-                return domainLength > 0 ? $"{domain}\\{name}" : name.ToString();
+                string account = domainLength > 0 ? $"{domain}\\{name}" : name.ToString();
+                AccountNamesBySid[sid] = account;
+                return account;
             }
             finally
             {
@@ -367,7 +429,7 @@ internal static partial class NativeMethods
     public static ProcessorPerformanceInformation[] QueryProcessorPerformance()
     {
         int size = Marshal.SizeOf<ProcessorPerformanceInformation>();
-        int length = size * Environment.ProcessorCount;
+        int length = size * LogicalProcessorCount;
         IntPtr buffer = Marshal.AllocHGlobal(length);
         try
         {
@@ -427,7 +489,7 @@ internal static partial class NativeMethods
 
     public static uint QueryProcessorMaxMhz()
     {
-        int size = Marshal.SizeOf<ProcessorPowerInformation>() * Math.Max(1, Environment.ProcessorCount);
+        int size = Marshal.SizeOf<ProcessorPowerInformation>() * LogicalProcessorCount;
         IntPtr buffer = Marshal.AllocHGlobal(size);
         try
         {
@@ -448,7 +510,7 @@ internal static partial class NativeMethods
 
     public static uint QueryProcessorCurrentMhz()
     {
-        int count = Math.Max(1, Environment.ProcessorCount);
+        int count = LogicalProcessorCount;
         int itemSize = Marshal.SizeOf<ProcessorPowerInformation>();
         IntPtr buffer = Marshal.AllocHGlobal(itemSize * count);
         try

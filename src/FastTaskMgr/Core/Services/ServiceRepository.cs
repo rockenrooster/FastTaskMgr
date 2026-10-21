@@ -18,66 +18,70 @@ internal sealed class ServiceRepository
             return [];
         }
 
-        int resume = 0;
-        _ = NativeMethods.EnumServicesStatusEx(
-            manager,
-            0,
-            NativeMethods.ServiceWin32,
-            NativeMethods.ServiceStateAll,
-            IntPtr.Zero,
-            0,
-            out int bytesNeeded,
-            out _,
-            ref resume,
-            null);
-
-        if (bytesNeeded <= 0)
+        // A service registered between the size query and the read makes the buffer too small;
+        // retry with the new size instead of showing an empty list.
+        const int errorMoreData = 234;
+        int bytesNeeded = 0;
+        for (int attempt = 0; attempt < 4; attempt++)
         {
-            return [];
-        }
-
-        IntPtr buffer = Marshal.AllocHGlobal(bytesNeeded);
-        try
-        {
-            resume = 0;
-            if (!NativeMethods.EnumServicesStatusEx(
-                manager,
-                0,
-                NativeMethods.ServiceWin32,
-                NativeMethods.ServiceStateAll,
-                buffer,
-                bytesNeeded,
-                out _,
-                out int returned,
-                ref resume,
-                null))
+            int resume = 0;
+            IntPtr buffer = bytesNeeded > 0 ? Marshal.AllocHGlobal(bytesNeeded) : IntPtr.Zero;
+            try
             {
-                return [];
-            }
+                if (NativeMethods.EnumServicesStatusEx(
+                    manager,
+                    0,
+                    NativeMethods.ServiceWin32,
+                    NativeMethods.ServiceStateAll,
+                    buffer,
+                    bytesNeeded,
+                    out int moreBytesNeeded,
+                    out int returned,
+                    ref resume,
+                    null))
+                {
+                    return ReadServices(manager, buffer, returned);
+                }
 
-            int size = Marshal.SizeOf<EnumServiceStatusProcess>();
-            List<ServiceRow> rows = new(returned);
-            for (int index = 0; index < returned; index++)
+                if (Marshal.GetLastWin32Error() != errorMoreData || moreBytesNeeded <= 0)
+                {
+                    return [];
+                }
+
+                bytesNeeded += moreBytesNeeded;
+            }
+            finally
             {
-                IntPtr itemPtr = IntPtr.Add(buffer, index * size);
-                EnumServiceStatusProcess item = Marshal.PtrToStructure<EnumServiceStatusProcess>(itemPtr);
-                string name = Marshal.PtrToStringUni(item.lpServiceName) ?? "";
-                (string description, string group) = ConfigFor(manager, name);
-                rows.Add(new ServiceRow(
-                    name,
-                    Marshal.PtrToStringUni(item.lpDisplayName) ?? name,
-                    description,
-                    StateName(item.ServiceStatusProcess.dwCurrentState),
-                    checked((int)item.ServiceStatusProcess.dwProcessId),
-                    group));
+                if (buffer != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
             }
+        }
 
-            return rows.OrderBy(row => row.DisplayName, StringComparer.OrdinalIgnoreCase).ToArray();
-        }
-        finally
+        return [];
+    }
+
+    private ServiceRow[] ReadServices(SafeServiceHandle manager, IntPtr buffer, int returned)
+    {
+        int size = Marshal.SizeOf<EnumServiceStatusProcess>();
+        List<ServiceRow> rows = new(returned);
+        for (int index = 0; index < returned; index++)
         {
-            Marshal.FreeHGlobal(buffer);
+            IntPtr itemPtr = IntPtr.Add(buffer, index * size);
+            EnumServiceStatusProcess item = Marshal.PtrToStructure<EnumServiceStatusProcess>(itemPtr);
+            string name = Marshal.PtrToStringUni(item.lpServiceName) ?? "";
+            (string description, string group) = ConfigFor(manager, name);
+            rows.Add(new ServiceRow(
+                name,
+                Marshal.PtrToStringUni(item.lpDisplayName) ?? name,
+                description,
+                StateName(item.ServiceStatusProcess.dwCurrentState),
+                checked((int)item.ServiceStatusProcess.dwProcessId),
+                group));
         }
+
+        return rows.OrderBy(row => row.DisplayName, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
     public void Start(string serviceName)
@@ -139,19 +143,17 @@ internal sealed class ServiceRepository
             return cached;
         }
 
-        (string Description, string Group) config = (QueryDescription(manager, serviceName), QueryGroup(manager, serviceName));
+        // One handle serves both queries (each open is an RPC to the service control manager).
+        using SafeServiceHandle service = NativeMethods.OpenService(manager, serviceName, NativeMethods.ServiceQueryConfig);
+        (string Description, string Group) config = service.IsInvalid
+            ? ("", "")
+            : (QueryDescription(service), QueryGroup(service));
         _configCache[serviceName] = config;
         return config;
     }
 
-    private static string QueryGroup(SafeServiceHandle manager, string serviceName)
+    private static string QueryGroup(SafeServiceHandle service)
     {
-        using SafeServiceHandle service = NativeMethods.OpenService(manager, serviceName, NativeMethods.ServiceQueryConfig);
-        if (service.IsInvalid)
-        {
-            return "";
-        }
-
         _ = NativeMethods.QueryServiceConfig(service, IntPtr.Zero, 0, out int bytesNeeded);
         if (bytesNeeded <= 0)
         {
@@ -175,14 +177,8 @@ internal sealed class ServiceRepository
         }
     }
 
-    private static string QueryDescription(SafeServiceHandle manager, string serviceName)
+    private static string QueryDescription(SafeServiceHandle service)
     {
-        using SafeServiceHandle service = NativeMethods.OpenService(manager, serviceName, NativeMethods.ServiceQueryConfig);
-        if (service.IsInvalid)
-        {
-            return "";
-        }
-
         _ = NativeMethods.QueryServiceConfig2(service, NativeMethods.ServiceConfigDescription, IntPtr.Zero, 0, out int bytesNeeded);
         if (bytesNeeded <= 0)
         {

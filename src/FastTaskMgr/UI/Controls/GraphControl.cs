@@ -5,7 +5,16 @@ namespace FastTaskMgr.UI.Controls;
 
 internal sealed class GraphControl : Control
 {
-    private readonly List<double> _samples = [];
+    private const int MaxSamples = 120;
+    private readonly List<double> _samples = new(MaxSamples);
+    private PointF[] _points = [];
+    private PointF[] _polygon = [];
+    // GDI+ objects are cached and rebuilt only when their color changes; a Performance page
+    // repaints dozens of graphs every tick.
+    private Pen? _borderPen;
+    private Pen? _gridPen;
+    private Pen? _linePen;
+    private SolidBrush? _fillBrush;
 
     public GraphControl()
     {
@@ -25,17 +34,21 @@ internal sealed class GraphControl : Control
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool Compact { get; set; }
 
-    public void SetSamples(IEnumerable<double> values)
+    public void SetSamples(IReadOnlyList<double> values)
     {
         _samples.Clear();
-        _samples.AddRange(values.Select(value => Math.Clamp(value, 0, 100)).TakeLast(120));
+        for (int index = Math.Max(0, values.Count - MaxSamples); index < values.Count; index++)
+        {
+            _samples.Add(Math.Clamp(values[index], 0, 100));
+        }
+
         Invalidate();
     }
 
     public void AddSample(double value)
     {
         _samples.Add(Math.Clamp(value, 0, 100));
-        if (_samples.Count > 120)
+        if (_samples.Count > MaxSamples)
         {
             _samples.RemoveAt(0);
         }
@@ -46,53 +59,88 @@ internal sealed class GraphControl : Control
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
+        Graphics graphics = e.Graphics;
         Rectangle bounds = ClientRectangle;
-        e.Graphics.Clear(BackColor);
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        graphics.Clear(BackColor);
 
-        using Pen borderPen = new(Color.FromArgb(130, ForeColor));
-        Rectangle border = new(bounds.Left, bounds.Top, bounds.Width - 1, bounds.Height - 1);
-        e.Graphics.DrawRectangle(borderPen, border);
+        // Axis-aligned 1px border and grid: crisper and cheaper without anti-aliasing.
+        graphics.SmoothingMode = SmoothingMode.None;
+        graphics.DrawRectangle(Cached(ref _borderPen, Color.FromArgb(130, ForeColor), 1f), bounds.Left, bounds.Top, bounds.Width - 1, bounds.Height - 1);
 
         if (!Compact)
         {
-            using Pen gridPen = new(Color.FromArgb(35, ForeColor));
+            Pen gridPen = Cached(ref _gridPen, Color.FromArgb(35, ForeColor), 1f);
             for (int i = 1; i < 4; i++)
             {
                 int y = bounds.Top + bounds.Height * i / 4;
-                e.Graphics.DrawLine(gridPen, bounds.Left, y, bounds.Right, y);
+                graphics.DrawLine(gridPen, bounds.Left, y, bounds.Right, y);
             }
 
             for (int i = 1; i < 8; i++)
             {
                 int x = bounds.Left + bounds.Width * i / 8;
-                e.Graphics.DrawLine(gridPen, x, bounds.Top, x, bounds.Bottom);
+                graphics.DrawLine(gridPen, x, bounds.Top, x, bounds.Bottom);
             }
 
-            TextRenderer.DrawText(e.Graphics, Caption, Font, new Point(8, 8), ForeColor);
+            TextRenderer.DrawText(graphics, Caption, Font, new Point(8, 8), ForeColor);
         }
 
-        if (_samples.Count < 2)
+        int count = _samples.Count;
+        if (count < 2)
         {
             return;
         }
 
-        PointF[] points = new PointF[_samples.Count];
-        for (int i = 0; i < _samples.Count; i++)
+        if (_points.Length != count)
         {
-            float x = bounds.Left + (bounds.Width - 1f) * i / Math.Max(1, _samples.Count - 1);
-            float y = bounds.Bottom - 1f - (float)(_samples[i] / 100d * (bounds.Height - 1));
-            points[i] = new PointF(x, y);
+            _points = new PointF[count];
+            _polygon = new PointF[count + 2];
         }
 
-        using GraphicsPath fillPath = new();
-        fillPath.AddLines(points);
-        fillPath.AddLine(points[^1].X, bounds.Bottom - 1, points[0].X, bounds.Bottom - 1);
-        fillPath.CloseFigure();
-        using SolidBrush fill = new(FillColor);
-        e.Graphics.FillPath(fill, fillPath);
+        for (int i = 0; i < count; i++)
+        {
+            float x = bounds.Left + (bounds.Width - 1f) * i / (count - 1);
+            float y = bounds.Bottom - 1f - (float)(_samples[i] / 100d * (bounds.Height - 1));
+            _points[i] = new PointF(x, y);
+            _polygon[i] = _points[i];
+        }
 
-        using Pen linePen = new(LineColor, 2f);
-        e.Graphics.DrawLines(linePen, points);
+        _polygon[count] = new PointF(_points[^1].X, bounds.Bottom - 1);
+        _polygon[count + 1] = new PointF(_points[0].X, bounds.Bottom - 1);
+
+        // The fill's top edge sits under the anti-aliased line, so it can be filled without AA.
+        if (_fillBrush is null || _fillBrush.Color != FillColor)
+        {
+            _fillBrush?.Dispose();
+            _fillBrush = new SolidBrush(FillColor);
+        }
+
+        graphics.FillPolygon(_fillBrush, _polygon);
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        graphics.DrawLines(Cached(ref _linePen, LineColor, 2f), _points);
+    }
+
+    private static Pen Cached(ref Pen? pen, Color color, float width)
+    {
+        if (pen is null || pen.Color != color)
+        {
+            pen?.Dispose();
+            pen = new Pen(color, width);
+        }
+
+        return pen;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _borderPen?.Dispose();
+            _gridPen?.Dispose();
+            _linePen?.Dispose();
+            _fillBrush?.Dispose();
+        }
+
+        base.Dispose(disposing);
     }
 }

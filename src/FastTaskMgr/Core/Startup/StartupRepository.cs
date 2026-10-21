@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using Microsoft.Win32;
 
@@ -7,6 +8,9 @@ internal sealed class StartupRepository
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string DisabledRoot = @"Software\FastTaskMgr\DisabledStartup";
+
+    // Publishers come from version resources read off disk; keep them between refreshes.
+    private readonly ConcurrentDictionary<string, string> _publishersByPath = new(StringComparer.OrdinalIgnoreCase);
 
     public IReadOnlyList<StartupItem> ListStartupItems()
     {
@@ -31,7 +35,7 @@ internal sealed class StartupRepository
         ToggleRegistryItem(item, enabled);
     }
 
-    private static void AddRegistryItems(List<StartupItem> items, RegistryKey hive, string hiveName, string subKey, bool enabled)
+    private void AddRegistryItems(List<StartupItem> items, RegistryKey hive, string hiveName, string subKey, bool enabled)
     {
         using RegistryKey? key = hive.OpenSubKey(subKey);
         if (key is null)
@@ -56,7 +60,7 @@ internal sealed class StartupRepository
         }
     }
 
-    private static void AddStartupFolderItems(List<StartupItem> items, string folder, string source)
+    private void AddStartupFolderItems(List<StartupItem> items, string folder, string source)
     {
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
         {
@@ -138,13 +142,28 @@ internal sealed class StartupRepository
         return exe >= 0 ? trimmed[..(exe + 4)] : trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
     }
 
-    private static string GetPublisher(string? path)
+    private string GetPublisher(string? path)
     {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return "";
+        }
+
+        if (_publishersByPath.TryGetValue(path, out string? cached))
+        {
+            return cached;
+        }
+
         try
         {
-            return string.IsNullOrWhiteSpace(path) || !File.Exists(path)
-                ? ""
-                : FileVersionInfo.GetVersionInfo(path).CompanyName ?? "";
+            if (!File.Exists(path))
+            {
+                return ""; // not cached: the target may be installed later
+            }
+
+            string publisher = FileVersionInfo.GetVersionInfo(path).CompanyName ?? "";
+            _publishersByPath[path] = publisher;
+            return publisher;
         }
         catch
         {

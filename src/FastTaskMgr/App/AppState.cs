@@ -34,15 +34,18 @@ internal sealed class AppState : IDisposable
 
     public static AppState Load() => new(AppSettings.Load());
 
-    public void SaveSettings()
+    /// <summary>Persists settings and notifies listeners. Returns false when the file could not be written.</summary>
+    public bool SaveSettings()
     {
-        Settings.Save();
+        bool saved = Settings.TrySave();
         SettingsChanged?.Invoke(this, EventArgs.Empty);
+        return saved;
     }
 
+    // Settings are persisted by the main window on close. The samplers wait for any
+    // in-flight background sample before releasing native buffers and PDH handles.
     public void Dispose()
     {
-        Settings.Save();
         if (_processes.IsValueCreated)
         {
             _processes.Value.Dispose();

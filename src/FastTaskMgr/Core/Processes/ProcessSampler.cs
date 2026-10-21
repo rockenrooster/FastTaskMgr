@@ -7,10 +7,14 @@ internal sealed class ProcessSampler : IDisposable
 {
     private readonly Lock _lock = new();
     private readonly SystemProcessReader _reader = new();
+    private readonly List<SystemProcessEntry> _entries = new(512);
     private readonly Dictionary<string, FileInfoEntry> _fileInfoByPath = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<ProcessKey, ProcessIdentity> _identities = [];
+    // Two counter maps swapped every sample instead of allocating a new one per tick.
     private Dictionary<ProcessKey, CounterSample> _lastCounters = [];
+    private Dictionary<ProcessKey, CounterSample> _nextCounters = [];
     private long _lastTimestamp;
+    private bool _disposed;
 
     private readonly record struct ProcessKey(int ProcessId, long CreateTime);
     private readonly record struct CounterSample(ulong CpuTime100ns, ulong IoBytes);
@@ -19,6 +23,7 @@ internal sealed class ProcessSampler : IDisposable
     // Immutable per process lifetime, so resolved once per (pid, create time) instead of per tick.
     private sealed class ProcessIdentity
     {
+        public string? Name;
         public string? Path;
         public string? UserName;
         public string Architecture = "";
@@ -31,18 +36,23 @@ internal sealed class ProcessSampler : IDisposable
     {
         lock (_lock)
         {
-            List<SystemProcessEntry> entries = _reader.Read();
-            (_, HashSet<int> hungPids) = WindowSnapshot.Query();
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _reader.Read(_entries);
+            HashSet<int> hungPids = WindowSnapshot.QueryHungProcessIds();
 
             long now = Stopwatch.GetTimestamp();
             double elapsedSeconds = _lastTimestamp == 0
                 ? 0
                 : Math.Max(0.001, (now - _lastTimestamp) / (double)Stopwatch.Frequency);
             _lastTimestamp = now;
+            // All logical processors, not Environment.ProcessorCount: that one follows this
+            // process's own affinity/job limits and would inflate every percentage.
+            double cpuCapacity100ns = elapsedSeconds * 10_000_000d * NativeMethods.LogicalProcessorCount;
 
-            Dictionary<ProcessKey, CounterSample> nextCounters = new(entries.Count);
-            List<ProcessRow> rows = new(entries.Count);
-            foreach (SystemProcessEntry entry in entries)
+            Dictionary<ProcessKey, CounterSample> nextCounters = _nextCounters;
+            nextCounters.Clear();
+            List<ProcessRow> rows = new(_entries.Count);
+            foreach (SystemProcessEntry entry in _entries)
             {
                 ProcessKey key = new(entry.ProcessId, entry.CreateTime);
                 nextCounters[key] = new CounterSample(entry.CpuTime100ns, entry.IoTransferBytes);
@@ -53,9 +63,7 @@ internal sealed class ProcessSampler : IDisposable
                 {
                     if (entry.CpuTime100ns >= last.CpuTime100ns)
                     {
-                        cpuPercent = Math.Min(
-                            100,
-                            (entry.CpuTime100ns - last.CpuTime100ns) / (elapsedSeconds * 10_000_000d * Environment.ProcessorCount) * 100);
+                        cpuPercent = Math.Min(100, (entry.CpuTime100ns - last.CpuTime100ns) / cpuCapacity100ns * 100);
                     }
 
                     if (entry.IoTransferBytes >= last.IoBytes)
@@ -67,6 +75,7 @@ internal sealed class ProcessSampler : IDisposable
                 rows.Add(BuildRow(entry, key, cpuPercent, diskBytesPerSecond, hungPids, includeDetails));
             }
 
+            _nextCounters = _lastCounters;
             _lastCounters = nextCounters;
             PruneIdentities(nextCounters);
             return rows;
@@ -74,7 +83,7 @@ internal sealed class ProcessSampler : IDisposable
     }
 
     private ProcessRow BuildRow(
-        SystemProcessEntry entry,
+        in SystemProcessEntry entry,
         ProcessKey key,
         double cpuPercent,
         double diskBytesPerSecond,
@@ -87,6 +96,7 @@ internal sealed class ProcessSampler : IDisposable
             _identities[key] = identity;
         }
 
+        identity.Name ??= _reader.ReadName(entry);
         string affinity = "";
         bool canOpen = entry.ProcessId > 0;
         bool needsStatic = canOpen && (!identity.PathResolved || (includeDetails && !identity.DetailsResolved));
@@ -130,7 +140,7 @@ internal sealed class ProcessSampler : IDisposable
         return new ProcessRow(
             entry.ProcessId,
             entry.ParentProcessId,
-            entry.Name,
+            identity.Name,
             status,
             cpuPercent,
             entry.WorkingSetBytes,
@@ -145,7 +155,8 @@ internal sealed class ProcessSampler : IDisposable
             company,
             identity.CommandLine,
             PriorityName(entry.BasePriority),
-            affinity);
+            affinity,
+            entry.CreateTime);
     }
 
     private void PruneIdentities(Dictionary<ProcessKey, CounterSample> liveKeys)
@@ -209,5 +220,13 @@ internal sealed class ProcessSampler : IDisposable
         _ => basePriority.ToString()
     };
 
-    public void Dispose() => _reader.Dispose();
+    // Waits for an in-flight background sample, so the snapshot buffer is never released under it.
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            _disposed = true;
+            _reader.Dispose();
+        }
+    }
 }

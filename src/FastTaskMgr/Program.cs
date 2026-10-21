@@ -2,7 +2,6 @@ using FastTaskMgr.App;
 using FastTaskMgr.Diagnostics;
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using System.Security.Principal;
 
 namespace FastTaskMgr;
@@ -10,7 +9,7 @@ namespace FastTaskMgr;
 internal static class Program
 {
     private const string InstanceMutexName = @"Local\FastTaskMgr.SingleInstance";
-    private const int SwRestore = 9;
+    private static bool _errorReported;
 
     [STAThread]
     private static int Main(string[] args)
@@ -23,22 +22,80 @@ internal static class Program
         using Mutex instanceMutex = new(true, InstanceMutexName, out bool createdNew);
         if (!createdNew)
         {
-            FocusExistingInstance();
+            SingleInstance.ActivateExisting();
             return 0;
         }
 
+        InstallExceptionHandlers();
         ApplicationConfiguration.Initialize();
         using AppState state = AppState.Load();
         if (state.Settings.AlwaysStartAsAdmin && !IsAdministrator())
         {
+            // Free the instance slot first: the elevated copy can reach its own check before this
+            // process exits, and would then take this process for the running instance and quit.
+            instanceMutex.ReleaseMutex();
             if (TryRelaunchAsAdministrator(args))
             {
+                return 0;
+            }
+
+            // UAC was declined: carry on unelevated if nothing else took the slot meanwhile.
+            if (!TryReacquire(instanceMutex))
+            {
+                SingleInstance.ActivateExisting();
                 return 0;
             }
         }
 
         Application.Run(new MainForm(state));
         return 0;
+    }
+
+    private static void InstallExceptionHandlers()
+    {
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) => ReportUiException(e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            if (e.ExceptionObject is Exception exception)
+            {
+                ErrorLog.Write("Unhandled", exception);
+            }
+        };
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            ErrorLog.Write("Unobserved task", e.Exception);
+            e.SetObserved();
+        };
+    }
+
+    // A UI-thread failure is logged and the app keeps running; the user is told once per session.
+    private static void ReportUiException(Exception exception)
+    {
+        ErrorLog.Write("UI thread", exception);
+        if (_errorReported)
+        {
+            return;
+        }
+
+        _errorReported = true;
+        MessageBox.Show(
+            $"FastTaskMgr hit an unexpected error and will keep running.{Environment.NewLine}{Environment.NewLine}{exception.Message}{Environment.NewLine}{Environment.NewLine}Details: {ErrorLog.FilePath}",
+            "FastTaskMgr",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Warning);
+    }
+
+    private static bool TryReacquire(Mutex mutex)
+    {
+        try
+        {
+            return mutex.WaitOne(0);
+        }
+        catch (AbandonedMutexException)
+        {
+            return true;
+        }
     }
 
     private static bool IsAdministrator()
@@ -72,30 +129,4 @@ internal static class Program
         argument.Contains(' ') || argument.Contains('"')
             ? "\"" + argument.Replace("\"", "\\\"", StringComparison.Ordinal) + "\""
             : argument;
-
-    private static void FocusExistingInstance()
-    {
-        int currentProcessId = Environment.ProcessId;
-        string processName = Process.GetCurrentProcess().ProcessName;
-        foreach (Process process in Process.GetProcessesByName(processName))
-        {
-            using (process)
-            {
-                if (process.Id == currentProcessId || process.MainWindowHandle == IntPtr.Zero)
-                {
-                    continue;
-                }
-
-                _ = ShowWindow(process.MainWindowHandle, SwRestore);
-                _ = SetForegroundWindow(process.MainWindowHandle);
-                return;
-            }
-        }
-    }
-
-    [DllImport("user32.dll")]
-    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-    [DllImport("user32.dll")]
-    private static extern bool SetForegroundWindow(IntPtr hWnd);
 }

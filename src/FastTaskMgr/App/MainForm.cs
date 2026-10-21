@@ -5,6 +5,9 @@ namespace FastTaskMgr.App;
 
 internal sealed class MainForm : Form
 {
+    /// <summary>Also used by a second launch to find this window, so keep it constant.</summary>
+    public const string WindowTitle = "FastTaskMgr";
+
     private readonly AppState _state;
     private readonly Panel _pageHost = new();
     private readonly TableLayoutPanel _header = new();
@@ -16,12 +19,14 @@ internal sealed class MainForm : Form
     private readonly NotifyIcon _trayIcon = new();
     private PageBase? _currentPage;
     private bool _updateCheckStarted;
+    private bool _suspended;
+    private FormWindowState _restoreState = FormWindowState.Normal;
 
     public MainForm(AppState state)
     {
         _state = state;
         _navSelectedFont = new Font(Font, FontStyle.Bold);
-        Text = "FastTaskMgr";
+        Text = WindowTitle;
         Icon? appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         if (appIcon is not null)
         {
@@ -29,14 +34,8 @@ internal sealed class MainForm : Form
         }
 
         MinimumSize = new Size(920, 600);
-        Size = new Size(_state.Settings.WindowWidth, _state.Settings.WindowHeight);
         TopMost = _state.Settings.AlwaysOnTop;
-
-        if (_state.Settings.WindowLeft >= 0 && _state.Settings.WindowTop >= 0)
-        {
-            StartPosition = FormStartPosition.Manual;
-            Location = new Point(_state.Settings.WindowLeft, _state.Settings.WindowTop);
-        }
+        RestoreWindowBounds();
 
         BuildTrayIcon();
         BuildLayout();
@@ -79,30 +78,114 @@ internal sealed class MainForm : Form
         });
     }
 
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        SingleInstance.AllowActivationFrom(Handle);
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == SingleInstance.ActivateMessage && m.Msg != 0)
+        {
+            RestoreFromTray();
+            return;
+        }
+
+        base.WndProc(ref m);
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        _currentPage?.OnHide();
-        _state.Settings.WindowWidth = Width;
-        _state.Settings.WindowHeight = Height;
-        _state.Settings.WindowLeft = Left;
-        _state.Settings.WindowTop = Top;
-        _state.SaveSettings();
+        _currentPage?.DeactivatePage();
+        SaveWindowBounds();
+        // Persist without raising SettingsChanged: re-theming and timer restarts are wasted work on exit.
+        _ = _state.Settings.TrySave();
         base.OnFormClosing(e);
     }
 
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
-        if (WindowState == FormWindowState.Minimized && _state.Settings.HideWhenMinimized)
+        if (WindowState != FormWindowState.Minimized)
+        {
+            _restoreState = WindowState;
+        }
+        else if (_state.Settings.HideWhenMinimized)
         {
             Hide();
         }
+
+        UpdateSuspended();
+    }
+
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        UpdateSuspended();
+    }
+
+    // Nothing is on screen while minimized or hidden in the tray, so live pages stop sampling.
+    private void UpdateSuspended()
+    {
+        if (!IsHandleCreated)
+        {
+            return;
+        }
+
+        bool suspended = !Visible || WindowState == FormWindowState.Minimized;
+        if (suspended == _suspended)
+        {
+            return;
+        }
+
+        _suspended = suspended;
+        _currentPage?.SetSuspended(suspended);
+    }
+
+    private void RestoreWindowBounds()
+    {
+        AppSettings settings = _state.Settings;
+        Size = new Size(settings.WindowWidth, settings.WindowHeight);
+        bool positionSaved = settings.WindowLeft != AppSettings.UnsetPosition || settings.WindowTop != AppSettings.UnsetPosition;
+        Rectangle bounds = new(settings.WindowLeft, settings.WindowTop, Width, Height);
+        if (positionSaved && IsTitleBarOnScreen(bounds))
+        {
+            StartPosition = FormStartPosition.Manual;
+            Location = bounds.Location;
+        }
+
+        if (settings.WindowMaximized)
+        {
+            WindowState = FormWindowState.Maximized;
+        }
+    }
+
+    // Bounds read while minimized or maximized are not the user's window size (a minimized
+    // window sits at -32000,-32000), so persist the restore bounds plus the maximized flag.
+    private void SaveWindowBounds()
+    {
+        Rectangle bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+        AppSettings settings = _state.Settings;
+        settings.WindowLeft = bounds.Left;
+        settings.WindowTop = bounds.Top;
+        settings.WindowWidth = bounds.Width;
+        settings.WindowHeight = bounds.Height;
+        settings.WindowMaximized = WindowState == FormWindowState.Maximized
+            || (WindowState == FormWindowState.Minimized && _restoreState == FormWindowState.Maximized);
+    }
+
+    // A monitor can be unplugged between runs; only reuse a position whose title bar is still reachable.
+    private static bool IsTitleBarOnScreen(Rectangle bounds)
+    {
+        Rectangle titleBar = new(bounds.Left + 40, bounds.Top, Math.Max(1, bounds.Width - 80), 30);
+        return Screen.AllScreens.Any(screen => screen.WorkingArea.IntersectsWith(titleBar));
     }
 
     private void BuildTrayIcon()
     {
         _trayIcon.Icon = Icon;
-        _trayIcon.Text = "FastTaskMgr";
+        _trayIcon.Text = WindowTitle;
         ContextMenuStrip menu = new();
         menu.Items.Add("Restore", null, (_, _) => RestoreFromTray());
         menu.Items.Add("Exit", null, (_, _) => Close());
@@ -113,7 +196,11 @@ internal sealed class MainForm : Form
     private void RestoreFromTray()
     {
         Show();
-        WindowState = FormWindowState.Normal;
+        if (WindowState == FormWindowState.Minimized)
+        {
+            WindowState = _restoreState;
+        }
+
         Activate();
     }
 
@@ -228,9 +315,9 @@ internal sealed class MainForm : Form
             page = _pages[key];
         }
 
-        _currentPage?.OnHide();
         if (_currentPage is not null)
         {
+            _currentPage.DeactivatePage();
             _currentPage.Visible = false;
         }
 
@@ -241,7 +328,8 @@ internal sealed class MainForm : Form
         _title.Text = page.Title;
         SetSearchVisible(page.UsesSearch);
         _search.Text = "";
-        page.OnShow();
+        page.SetSuspended(_suspended);
+        page.ActivatePage();
 
         foreach ((string navKey, Button button) in _navButtons)
         {
@@ -294,13 +382,20 @@ internal sealed class MainForm : Form
             return;
         }
 
-        if (InvokeRequired && IsHandleCreated)
+        if (!InvokeRequired)
         {
-            BeginInvoke(action);
+            action();
             return;
         }
 
-        action();
+        try
+        {
+            BeginInvoke(action);
+        }
+        catch (InvalidOperationException)
+        {
+            // The window handle is gone (shutting down); nothing left to update.
+        }
     }
 
     private async Task StartLazyUpdateCheckAsync()

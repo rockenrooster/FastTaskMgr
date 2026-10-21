@@ -10,6 +10,12 @@ internal sealed class VirtualTable<T> : ListView
     private readonly IReadOnlyList<TableColumn<T>> _columns;
     private readonly Func<T, object?> _keySelector;
     private IReadOnlyList<T> _rows = [];
+    // WinForms raises RetrieveVirtualItem for the row and again for every owner-drawn cell
+    // (plus hit tests), so building the item on each request formatted every column ~40 times
+    // per visible row per repaint. Items are cached until the next SetRows.
+    private ListViewItem?[] _itemCache = [];
+    private SolidBrush? _backBrush;
+    private SolidBrush? _hoverBrush;
     private int _sortColumn;
     private bool _sortDescending;
     private int _hotIndex = -1;
@@ -96,12 +102,18 @@ internal sealed class VirtualTable<T> : ListView
     public void SetRows(IEnumerable<T> rows)
     {
         int horizontalScroll = _userHorizontalScroll;
-        BeginUpdate();
+        int previousCount = _rows.Count;
+        ListViewItem?[] previousItems = _itemCache;
+        // Freeze redraw natively rather than with BeginUpdate/EndUpdate: WinForms' EndUpdate
+        // invalidates the whole control, which forced a full repaint on every refresh.
+        SetRedraw(false);
         try
         {
-            HashSet<object> selectedKeys = SelectedIndices
+            int[] selectedBefore = SelectedIndices
                 .Cast<int>()
                 .Where(index => index >= 0 && index < _rows.Count)
+                .ToArray();
+            HashSet<object> selectedKeys = selectedBefore
                 .Select(index => _keySelector(_rows[index]))
                 .Where(key => key is not null)
                 .Select(key => key!)
@@ -114,9 +126,10 @@ internal sealed class VirtualTable<T> : ListView
                 : rows.OrderBy(key, Comparer<IComparable?>.Create(CompareNullable));
 
             _rows = sorted.ToArray();
+            _itemCache = new ListViewItem?[_rows.Count];
             VirtualListSize = _rows.Count;
-            SelectedIndices.Clear();
 
+            List<int> selectedAfter = [];
             if (selectedKeys.Count > 0)
             {
                 for (int index = 0; index < _rows.Count; index++)
@@ -124,21 +137,106 @@ internal sealed class VirtualTable<T> : ListView
                     object? rowKey = _keySelector(_rows[index]);
                     if (rowKey is not null && selectedKeys.Contains(rowKey))
                     {
-                        SelectedIndices.Add(index);
+                        selectedAfter.Add(index);
                     }
                 }
             }
 
-            Invalidate();
+            // Touch the native selection only when it moved; each change invalidates rows.
+            if (!selectedBefore.SequenceEqual(selectedAfter))
+            {
+                SelectedIndices.Clear();
+                foreach (int index in selectedAfter)
+                {
+                    SelectedIndices.Add(index);
+                }
+            }
         }
         finally
         {
-            // EndUpdate must come first: re-enabling redraw runs the list view's deferred
-            // "scroll focused item into view" (triggered by item-count changes while a row
-            // is selected), which would otherwise undo the restore.
-            EndUpdate();
+            // Redraw must be re-enabled first: that runs the list view's deferred "scroll
+            // focused item into view" (triggered by item-count changes while a row is
+            // selected), which would otherwise undo the restore.
+            SetRedraw(true);
             RestoreHorizontalScroll(horizontalScroll);
         }
+
+        InvalidateChangedRows(previousItems, previousCount);
+    }
+
+    private void SetRedraw(bool enabled)
+    {
+        if (IsHandleCreated)
+        {
+            const int wmSetRedraw = 0x000B;
+            _ = ListViewNative.SendMessage(Handle, wmSetRedraw, (IntPtr)(enabled ? 1 : 0), IntPtr.Zero);
+        }
+    }
+
+    // Repaint only the visible rows whose text changed. Between ticks most rows are identical,
+    // and repainting them was the bulk of the UI thread's work.
+    private void InvalidateChangedRows(ListViewItem?[] previousItems, int previousCount)
+    {
+        if (!IsHandleCreated)
+        {
+            return;
+        }
+
+        if (_rows.Count != previousCount)
+        {
+            Invalidate();
+            return;
+        }
+
+        int top = Math.Max(0, (int)ListViewNative.SendMessage(Handle, ListViewNative.LvmGetTopIndex, IntPtr.Zero, IntPtr.Zero));
+        int perPage = (int)ListViewNative.SendMessage(Handle, ListViewNative.LvmGetCountPerPage, IntPtr.Zero, IntPtr.Zero);
+        int end = Math.Min(_rows.Count, top + perPage + 2);
+
+        // The list view repaints every row inside the bounding box of its update region, so
+        // scattered changes would drag in every row between them. Paint each run of changed
+        // rows on its own, after flushing whatever the control invalidated itself.
+        Update();
+        int runStart = -1;
+        for (int index = top; index <= end; index++)
+        {
+            bool changed = index < end
+                && (index >= previousItems.Length || previousItems[index] is not { } before || !SameText(before, ItemAt(index)));
+            if (changed)
+            {
+                if (runStart < 0)
+                {
+                    runStart = index;
+                }
+
+                continue;
+            }
+
+            if (runStart >= 0)
+            {
+                Invalidate(Rectangle.Union(GetItemRect(runStart), GetItemRect(index - 1)));
+                Update();
+                runStart = -1;
+            }
+        }
+    }
+
+    private static bool SameText(ListViewItem left, ListViewItem right)
+    {
+        int count = left.SubItems.Count;
+        if (count != right.SubItems.Count)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < count; index++)
+        {
+            if (!string.Equals(left.SubItems[index].Text, right.SubItems[index].Text, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     public bool SelectKey(object key)
@@ -160,14 +258,34 @@ internal sealed class VirtualTable<T> : ListView
 
     protected override void OnRetrieveVirtualItem(RetrieveVirtualItemEventArgs e)
     {
-        T row = _rows[e.ItemIndex];
-        string[] subItems = new string[_columns.Count];
-        for (int index = 0; index < _columns.Count; index++)
+        int itemIndex = e.ItemIndex;
+        if ((uint)itemIndex >= (uint)_rows.Count)
         {
-            subItems[index] = _columns[index].Text(row);
+            // Stale request from the native control while the row count changes.
+            e.Item = new ListViewItem(new string[_columns.Count]);
+            return;
         }
 
-        e.Item = new ListViewItem(subItems);
+        e.Item = ItemAt(itemIndex);
+    }
+
+    private ListViewItem ItemAt(int itemIndex)
+    {
+        ListViewItem? item = _itemCache[itemIndex];
+        if (item is null)
+        {
+            T row = _rows[itemIndex];
+            string[] subItems = new string[_columns.Count];
+            for (int index = 0; index < _columns.Count; index++)
+            {
+                subItems[index] = _columns[index].Text(row);
+            }
+
+            item = new ListViewItem(subItems);
+            _itemCache[itemIndex] = item;
+        }
+
+        return item;
     }
 
     protected override void OnDrawColumnHeader(DrawListViewColumnHeaderEventArgs e)
@@ -176,18 +294,11 @@ internal sealed class VirtualTable<T> : ListView
         base.OnDrawColumnHeader(e);
     }
 
-    protected override void OnDrawItem(DrawListViewItemEventArgs e)
-    {
-        base.OnDrawItem(e);
-    }
-
     protected override void OnDrawSubItem(DrawListViewSubItemEventArgs e)
     {
         bool selected = e.Item?.Selected == true;
-        Color hoverBackColor = BackColor.GetBrightness() < 0.5f ? DarkHoverBackColor : LightHoverBackColor;
-        Color backColor = selected ? SystemColors.Highlight : e.ItemIndex == _hotIndex ? hoverBackColor : BackColor;
+        Brush background = selected ? SystemBrushes.Highlight : e.ItemIndex == _hotIndex ? HoverBrush() : BackBrush();
         Color textColor = selected ? SystemColors.HighlightText : ForeColor;
-        using SolidBrush background = new(backColor);
         e.Graphics.FillRectangle(background, e.Bounds);
         Rectangle textBounds = new(e.Bounds.Left + 4, e.Bounds.Top, Math.Max(0, e.Bounds.Width - 8), e.Bounds.Height);
         TextRenderer.DrawText(
@@ -197,10 +308,44 @@ internal sealed class VirtualTable<T> : ListView
             textBounds,
             textColor,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
-        using Pen grid = new(SystemColors.ControlLight);
-        e.Graphics.DrawLine(grid, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
-        e.Graphics.DrawLine(grid, e.Bounds.Right - 1, e.Bounds.Top, e.Bounds.Right - 1, e.Bounds.Bottom);
+        // No manual grid lines: the native GridLines pass draws over owner-drawn cells, and the
+        // GDI+ DrawLine calls that duplicated it were the most expensive part of each cell.
         base.OnDrawSubItem(e);
+    }
+
+    // Brushes follow BackColor (theme switches); cached so cell painting allocates no GDI+ objects.
+    private SolidBrush BackBrush()
+    {
+        if (_backBrush is null || _backBrush.Color != BackColor)
+        {
+            _backBrush?.Dispose();
+            _backBrush = new SolidBrush(BackColor);
+        }
+
+        return _backBrush;
+    }
+
+    private SolidBrush HoverBrush()
+    {
+        Color hoverBackColor = BackColor.GetBrightness() < 0.5f ? DarkHoverBackColor : LightHoverBackColor;
+        if (_hoverBrush is null || _hoverBrush.Color != hoverBackColor)
+        {
+            _hoverBrush?.Dispose();
+            _hoverBrush = new SolidBrush(hoverBackColor);
+        }
+
+        return _hoverBrush;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _backBrush?.Dispose();
+            _hoverBrush?.Dispose();
+        }
+
+        base.Dispose(disposing);
     }
 
     protected override void OnColumnClick(ColumnClickEventArgs e)
@@ -331,6 +476,8 @@ file static class ListViewNative
 {
     public const int SbHorz = 0;
     public const int LvmScroll = 0x1014;
+    public const int LvmGetTopIndex = 0x1027;
+    public const int LvmGetCountPerPage = 0x1028;
 
     [DllImport("user32.dll")]
     public static extern int GetScrollPos(IntPtr hWnd, int nBar);

@@ -9,10 +9,8 @@ internal sealed class UsersPage : PageBase
 {
     private readonly UserSessionRepository _repository = new();
     private readonly VirtualTable<UserSessionRow> _table;
-    private readonly System.Windows.Forms.Timer _timer = new();
     private IReadOnlyList<UserSessionRow> _rows = [];
     private string _filter = "";
-    private bool _refreshing;
 
     public UsersPage(AppState state)
         : base(state)
@@ -29,22 +27,20 @@ internal sealed class UsersPage : PageBase
 
         Controls.Add(_table);
         Controls.Add(BuildToolbar());
-        _timer.Tick += async (_, _) => await RefreshRowsAsync();
-        State.SettingsChanged += (_, _) => ConfigureTimer();
+        SetRefreshAction(RefreshRowsAsync, autoRefresh: true);
     }
 
     public override string Title => "Users";
 
-    public override async void OnShow()
-    {
-        ConfigureTimer();
-        await RefreshRowsAsync();
-    }
-
-    public override void OnHide() => _timer.Stop();
+    protected override async void OnShow() => await RefreshAsync();
 
     public override void ApplySearch(string searchText)
     {
+        if (_filter == searchText)
+        {
+            return;
+        }
+
         _filter = searchText;
         ApplyFilter();
     }
@@ -61,7 +57,7 @@ internal sealed class UsersPage : PageBase
 
         AddButton(toolbar, "Disconnect", () => WithSelected(Disconnect));
         AddButton(toolbar, "Sign off", () => WithSelected(SignOff));
-        AddButton(toolbar, "Refresh", async () => await RefreshRowsAsync());
+        AddButton(toolbar, "Refresh", async () => await RequestRefreshAsync());
         return toolbar;
     }
 
@@ -74,24 +70,11 @@ internal sealed class UsersPage : PageBase
 
     private async Task RefreshRowsAsync()
     {
-        if (_refreshing || IsDisposed)
+        IReadOnlyList<UserSessionRow> rows = await Task.Run(BuildRows);
+        if (!IsDisposed)
         {
-            return;
-        }
-
-        _refreshing = true;
-        try
-        {
-            IReadOnlyList<UserSessionRow> rows = await Task.Run(BuildRows);
-            if (!IsDisposed)
-            {
-                _rows = rows;
-                ApplyFilter();
-            }
-        }
-        finally
-        {
-            _refreshing = false;
+            _rows = rows;
+            ApplyFilter();
         }
     }
 
@@ -120,17 +103,6 @@ internal sealed class UsersPage : PageBase
         }
 
         return rows;
-    }
-
-    private void ConfigureTimer()
-    {
-        int interval = State.Settings.UpdateSpeed.ToMilliseconds();
-        _timer.Stop();
-        if (interval > 0)
-        {
-            _timer.Interval = interval;
-            _timer.Start();
-        }
     }
 
     private void ApplyFilter()
@@ -168,7 +140,7 @@ internal sealed class UsersPage : PageBase
         try
         {
             await Task.Run(action);
-            await RefreshRowsAsync();
+            await RequestRefreshAsync();
         }
         catch (Exception ex)
         {

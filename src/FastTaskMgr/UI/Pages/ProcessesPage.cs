@@ -7,10 +7,8 @@ namespace FastTaskMgr.UI.Pages;
 internal sealed class ProcessesPage : PageBase
 {
     private readonly VirtualTable<ProcessRow> _table;
-    private readonly System.Windows.Forms.Timer _timer = new();
     private IReadOnlyList<ProcessRow> _rows = [];
     private string _filter = "";
-    private bool _refreshing;
 
     public ProcessesPage(AppState state)
         : base(state)
@@ -40,22 +38,20 @@ internal sealed class ProcessesPage : PageBase
 
         Controls.Add(_table);
         Controls.Add(BuildToolbar());
-        _timer.Tick += async (_, _) => await RefreshRowsAsync();
-        State.SettingsChanged += (_, _) => ConfigureTimer();
+        SetRefreshAction(RefreshRowsAsync, autoRefresh: true);
     }
 
     public override string Title => "Processes";
 
-    public override async void OnShow()
-    {
-        ConfigureTimer();
-        await RefreshRowsAsync();
-    }
-
-    public override void OnHide() => _timer.Stop();
+    protected override async void OnShow() => await RefreshAsync();
 
     public override void ApplySearch(string searchText)
     {
+        if (_filter == searchText)
+        {
+            return;
+        }
+
         _filter = searchText;
         ApplyFilter();
     }
@@ -75,7 +71,7 @@ internal sealed class ProcessesPage : PageBase
         AddButton(toolbar, "Open location", () => WithSelected(ProcessActions.OpenFileLocation, "Open location"));
         AddButton(toolbar, "Properties", () => WithSelected(ProcessActions.ShowProperties, "Properties"));
         AddButton(toolbar, "Search online", () => WithSelected(ProcessActions.SearchOnline, "Search online"));
-        AddButton(toolbar, "Refresh", async () => await RefreshRowsAsync());
+        AddButton(toolbar, "Refresh", async () => await RequestRefreshAsync());
         return toolbar;
     }
 
@@ -109,35 +105,11 @@ internal sealed class ProcessesPage : PageBase
 
     private async Task RefreshRowsAsync()
     {
-        if (_refreshing || IsDisposed || (ModifierKeys & Keys.Control) == Keys.Control)
+        IReadOnlyList<ProcessRow> rows = await Task.Run(() => State.Processes.Sample());
+        if (!IsDisposed)
         {
-            return;
-        }
-
-        _refreshing = true;
-        try
-        {
-            IReadOnlyList<ProcessRow> rows = await Task.Run(() => State.Processes.Sample());
-            if (!IsDisposed)
-            {
-                _rows = rows;
-                ApplyFilter();
-            }
-        }
-        finally
-        {
-            _refreshing = false;
-        }
-    }
-
-    private void ConfigureTimer()
-    {
-        int interval = State.Settings.UpdateSpeed.ToMilliseconds();
-        _timer.Stop();
-        if (interval > 0)
-        {
-            _timer.Interval = interval;
-            _timer.Start();
+            _rows = rows;
+            ApplyFilter();
         }
     }
 

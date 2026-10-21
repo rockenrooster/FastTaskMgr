@@ -18,12 +18,12 @@ internal static class ProcessActions
         "lsass"
     };
 
-    public static bool EndProcess(ProcessRow row) => NativeMethods.TerminateProcessById(row.ProcessId);
+    public static bool EndProcess(ProcessRow row) => NativeMethods.TerminateProcess(row.ProcessId, row.CreateTime);
 
     /// <summary>Terminates the process and every live descendant. Returns the PIDs that could not be ended.</summary>
     public static IReadOnlyList<int> EndProcessTree(ProcessRow target, IReadOnlyList<ProcessRow> allRows)
     {
-        Dictionary<int, List<int>> childrenByParent = [];
+        Dictionary<int, List<ProcessRow>> childrenByParent = [];
         foreach (ProcessRow row in allRows)
         {
             if (row.ProcessId == 0 || row.ParentProcessId == row.ProcessId)
@@ -31,38 +31,43 @@ internal static class ProcessActions
                 continue;
             }
 
-            if (!childrenByParent.TryGetValue(row.ParentProcessId, out List<int>? children))
+            if (!childrenByParent.TryGetValue(row.ParentProcessId, out List<ProcessRow>? children))
             {
                 children = [];
                 childrenByParent[row.ParentProcessId] = children;
             }
 
-            children.Add(row.ProcessId);
+            children.Add(row);
         }
 
         List<int> failed = [];
         HashSet<int> visited = [];
-        Queue<int> pending = new();
-        pending.Enqueue(target.ProcessId);
+        Queue<ProcessRow> pending = new();
+        pending.Enqueue(target);
         while (pending.Count > 0)
         {
-            int pid = pending.Dequeue();
-            if (pid <= 0 || !visited.Add(pid))
+            ProcessRow process = pending.Dequeue();
+            if (process.ProcessId <= 0 || !visited.Add(process.ProcessId))
             {
                 continue;
             }
 
-            if (childrenByParent.TryGetValue(pid, out List<int>? children))
+            if (childrenByParent.TryGetValue(process.ProcessId, out List<ProcessRow>? children))
             {
-                foreach (int child in children)
+                foreach (ProcessRow child in children)
                 {
-                    pending.Enqueue(child);
+                    // Parent PIDs are never cleared when a parent exits, so a "child" created
+                    // before this process belongs to an earlier owner of the recycled PID.
+                    if (child.CreateTime >= process.CreateTime)
+                    {
+                        pending.Enqueue(child);
+                    }
                 }
             }
 
-            if (!NativeMethods.TerminateProcessById(pid))
+            if (!NativeMethods.TerminateProcess(process.ProcessId, process.CreateTime))
             {
-                failed.Add(pid);
+                failed.Add(process.ProcessId);
             }
         }
 

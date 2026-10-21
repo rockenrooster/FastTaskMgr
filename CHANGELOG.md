@@ -6,6 +6,24 @@ All notable changes to FastTaskMgr are documented here.
 
 - Add upcoming user-visible changes here before tagging a release.
 
+### Changed
+- Pages only refresh while they are visible: sampling pauses while the window is minimized or hidden in the tray, and saving settings no longer starts background refresh timers for every page.
+- Process tables repaint only the rows whose values changed, and cells no longer redraw the grid lines a second time; a refresh where nothing changed no longer repaints the table at all.
+- The Performance page caches drive capacity and the network adapter list (refreshed every 10-15 seconds and on network changes), cutting a refresh from about 11 ms to under 1 ms on a machine with many virtual adapters.
+- Process sampling allocates about 80% less memory per refresh, and Details page user names are resolved once per account instead of once per process.
+- Settings are loaded and saved with source-generated JSON and written atomically, so an interrupted save can no longer reset them.
+### Fixed
+- Switching between Performance tiles leaked window handles (about 3,000 after 800 switches), which could eventually crash the app.
+- End process tree could end unrelated processes whose parent PID had been recycled. End task and End process now also confirm the PID still belongs to the sampled process.
+- Starting FastTaskMgr again now brings back the running window, including when it is hidden in the tray or running elevated.
+- With "Always start as admin", the elevated copy could exit immediately if the original process still held the single-instance lock.
+- Closing while minimized or maximized saved the wrong window size and position. The maximized state is now remembered, and positions on disconnected monitors are ignored.
+- Saving settings without admin rights showed "Requested registry access is not allowed" even when the Task Manager shortcut option was unchanged.
+- Refresh errors are written to `%LocalAppData%\FastTaskMgr\error.log` instead of raising an error dialog on every tick, and exiting no longer races an in-flight sample.
+- CPU percentages are computed against all logical processors even when FastTaskMgr runs with restricted processor affinity.
+- The selected Performance tile is readable in dark mode, and tile hover states are easier to see.
+- The Services list no longer comes back empty when a service is registered while it loads, and the Startup apps page loads off the UI thread.
+
 ## 0.1.0.41 - 2026-07-12
 
 ### Changed

@@ -10,7 +10,6 @@ internal sealed class ServicesPage : PageBase
     private readonly VirtualTable<ServiceRow> _table;
     private IReadOnlyList<ServiceRow> _rows = [];
     private string _filter = "";
-    private bool _refreshing;
 
     public ServicesPage(AppState state)
         : base(state)
@@ -28,14 +27,20 @@ internal sealed class ServicesPage : PageBase
 
         Controls.Add(_table);
         Controls.Add(BuildToolbar());
+        SetRefreshAction(RefreshRowsAsync, autoRefresh: false);
     }
 
     public override string Title => "Services";
 
-    public override async void OnShow() => await RefreshRowsAsync();
+    protected override async void OnShow() => await RefreshAsync();
 
     public override void ApplySearch(string searchText)
     {
+        if (_filter == searchText)
+        {
+            return;
+        }
+
         _filter = searchText;
         ApplyFilter();
     }
@@ -55,7 +60,7 @@ internal sealed class ServicesPage : PageBase
         AddButton(toolbar, "Restart", RestartSelected);
         AddButton(toolbar, "Open Services", OpenServicesConsole);
         AddButton(toolbar, "Search online", () => WithSelected(row => Process.Start(new ProcessStartInfo($"https://www.bing.com/search?q={Uri.EscapeDataString(row.Name)}") { UseShellExecute = true })));
-        AddButton(toolbar, "Refresh", async () => await RefreshRowsAsync());
+        AddButton(toolbar, "Refresh", async () => await RequestRefreshAsync());
         return toolbar;
     }
 
@@ -81,24 +86,11 @@ internal sealed class ServicesPage : PageBase
 
     private async Task RefreshRowsAsync()
     {
-        if (_refreshing || IsDisposed)
+        IReadOnlyList<ServiceRow> rows = await Task.Run(State.Services.ListServices);
+        if (!IsDisposed)
         {
-            return;
-        }
-
-        _refreshing = true;
-        try
-        {
-            IReadOnlyList<ServiceRow> rows = await Task.Run(State.Services.ListServices);
-            if (!IsDisposed)
-            {
-                _rows = rows;
-                ApplyFilter();
-            }
-        }
-        finally
-        {
-            _refreshing = false;
+            _rows = rows;
+            ApplyFilter();
         }
     }
 
@@ -127,7 +119,7 @@ internal sealed class ServicesPage : PageBase
         try
         {
             await Task.Run(action);
-            await RefreshRowsAsync();
+            await RequestRefreshAsync();
         }
         catch (Exception ex)
         {

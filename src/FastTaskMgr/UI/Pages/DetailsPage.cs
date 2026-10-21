@@ -8,10 +8,8 @@ namespace FastTaskMgr.UI.Pages;
 internal sealed class DetailsPage : PageBase
 {
     private readonly VirtualTable<ProcessRow> _table;
-    private readonly System.Windows.Forms.Timer _timer = new();
     private IReadOnlyList<ProcessRow> _rows = [];
     private string _filter = "";
-    private bool _refreshing;
     private int _pendingFocusPid = -1;
 
     public DetailsPage(AppState state)
@@ -46,19 +44,12 @@ internal sealed class DetailsPage : PageBase
 
         Controls.Add(_table);
         Controls.Add(BuildToolbar());
-        _timer.Tick += async (_, _) => await RefreshRowsAsync();
-        State.SettingsChanged += (_, _) => ConfigureTimer();
+        SetRefreshAction(RefreshRowsAsync, autoRefresh: true);
     }
 
     public override string Title => "Details";
 
-    public override async void OnShow()
-    {
-        ConfigureTimer();
-        await RefreshRowsAsync();
-    }
-
-    public override void OnHide() => _timer.Stop();
+    protected override async void OnShow() => await RefreshAsync();
 
     public void FocusProcess(int processId)
     {
@@ -71,6 +62,11 @@ internal sealed class DetailsPage : PageBase
 
     public override void ApplySearch(string searchText)
     {
+        if (_filter == searchText)
+        {
+            return;
+        }
+
         _filter = searchText;
         ApplyFilter();
     }
@@ -99,7 +95,7 @@ internal sealed class DetailsPage : PageBase
         priority.SelectedItem = "Normal";
         toolbar.Controls.Add(priority);
         AddButton(toolbar, "Set priority", () => SetPriority(priority.Text));
-        AddButton(toolbar, "Refresh", async () => await RefreshRowsAsync());
+        AddButton(toolbar, "Refresh", async () => await RequestRefreshAsync());
         return toolbar;
     }
 
@@ -140,39 +136,15 @@ internal sealed class DetailsPage : PageBase
 
     private async Task RefreshRowsAsync()
     {
-        if (_refreshing || IsDisposed || (ModifierKeys & Keys.Control) == Keys.Control)
+        IReadOnlyList<ProcessRow> rows = await Task.Run(() => State.Processes.Sample(includeDetails: true));
+        if (!IsDisposed)
         {
-            return;
-        }
-
-        _refreshing = true;
-        try
-        {
-            IReadOnlyList<ProcessRow> rows = await Task.Run(() => State.Processes.Sample(includeDetails: true));
-            if (!IsDisposed)
+            _rows = rows;
+            ApplyFilter();
+            if (_pendingFocusPid >= 0 && _table.SelectKey(_pendingFocusPid))
             {
-                _rows = rows;
-                ApplyFilter();
-                if (_pendingFocusPid >= 0 && _table.SelectKey(_pendingFocusPid))
-                {
-                    _pendingFocusPid = -1;
-                }
+                _pendingFocusPid = -1;
             }
-        }
-        finally
-        {
-            _refreshing = false;
-        }
-    }
-
-    private void ConfigureTimer()
-    {
-        int interval = State.Settings.UpdateSpeed.ToMilliseconds();
-        _timer.Stop();
-        if (interval > 0)
-        {
-            _timer.Interval = interval;
-            _timer.Start();
         }
     }
 
