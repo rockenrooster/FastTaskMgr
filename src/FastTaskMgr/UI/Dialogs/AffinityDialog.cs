@@ -75,16 +75,17 @@ internal sealed class AffinityDialog : Form
         ClientSize = new Size(Math.Max(280, 24 + columns * 110), Math.Min(320, 24 + Math.Min(16, _cpuBoxes.Count) * 24) + 88);
     }
 
-    public static void Show(IWin32Window owner, int processId, string processName)
+    /// <summary>Returns true when a new affinity was applied.</summary>
+    public static bool Show(IWin32Window owner, int processId, string processName)
     {
         if (!NativeMethods.QueryAffinityMasks(processId, out ulong processMask, out ulong systemMask) || systemMask == 0)
         {
             MessageBox.Show(owner, "Could not read the processor affinity. Access may be denied.", "Processor affinity", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
+            return false;
         }
 
         using AffinityDialog dialog = new(processId, processName, processMask, systemMask);
-        _ = dialog.ShowDialog(owner);
+        return dialog.ShowDialog(owner) == DialogResult.OK;
     }
 
     private void SetAll(bool value)

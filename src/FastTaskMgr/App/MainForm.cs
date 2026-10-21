@@ -7,6 +7,7 @@ internal sealed class MainForm : Form
 {
     /// <summary>Also used by a second launch to find this window, so keep it constant.</summary>
     public const string WindowTitle = "FastTaskMgr";
+    private static readonly string[] PageKeys = ["Processes", "Performance", "Startup apps", "Users", "Details", "Services", "Settings"];
 
     private readonly AppState _state;
     private readonly Panel _pageHost = new();
@@ -39,18 +40,17 @@ internal sealed class MainForm : Form
 
         BuildTrayIcon();
         BuildLayout();
-        RegisterPages();
         _state.SettingsChanged += (_, _) => ApplySettings();
         _state.DetailsNavigationRequested += (_, pid) =>
         {
             ShowPage("Details");
-            if (_pages["Details"] is DetailsPage details)
+            if (_pages.GetValueOrDefault("Details") is DetailsPage details)
             {
                 details.FocusProcess(pid);
             }
         };
-        ShowPage(string.IsNullOrWhiteSpace(_state.Settings.LastPage) ? _state.Settings.DefaultPage : _state.Settings.LastPage);
         ApplySettings();
+        ShowPage(string.IsNullOrWhiteSpace(_state.Settings.LastPage) ? _state.Settings.DefaultPage : _state.Settings.LastPage);
     }
 
     protected override async void OnShown(EventArgs e)
@@ -236,7 +236,7 @@ internal sealed class MainForm : Form
         };
         nav.Controls.Add(brand);
 
-        foreach (string page in new[] { "Processes", "Performance", "Startup apps", "Users", "Details", "Services", "Settings" })
+        foreach (string page in PageKeys)
         {
             Button button = new()
             {
@@ -289,30 +289,45 @@ internal sealed class MainForm : Form
         content.Controls.Add(_pageHost, 0, 1);
     }
 
-    private void RegisterPages()
+    // Pages are built on first visit and themed as they are created: most sessions only ever
+    // open one or two of them, and building all seven delayed the first paint.
+    private PageBase? GetOrCreatePage(string key)
     {
-        AddPage("Processes", new ProcessesPage(_state));
-        AddPage("Performance", new PerformancePage(_state));
-        AddPage("Startup apps", new StartupPage(_state));
-        AddPage("Users", new UsersPage(_state));
-        AddPage("Details", new DetailsPage(_state));
-        AddPage("Services", new ServicesPage(_state));
-        AddPage("Settings", new SettingsPage(_state));
-    }
+        if (_pages.TryGetValue(key, out PageBase? page))
+        {
+            return page;
+        }
 
-    private void AddPage(string key, PageBase page)
-    {
+        page = key switch
+        {
+            "Processes" => new ProcessesPage(_state),
+            "Performance" => new PerformancePage(_state),
+            "Startup apps" => new StartupPage(_state),
+            "Users" => new UsersPage(_state),
+            "Details" => new DetailsPage(_state),
+            "Services" => new ServicesPage(_state),
+            "Settings" => new SettingsPage(_state),
+            _ => null
+        };
+        if (page is null)
+        {
+            return null;
+        }
+
         page.Visible = false;
+        AppTheme.Apply(page, _state.Settings.Theme);
         _pages[key] = page;
         _pageHost.Controls.Add(page);
+        return page;
     }
 
     private void ShowPage(string key)
     {
-        if (!_pages.TryGetValue(key, out PageBase? page))
+        PageBase? page = GetOrCreatePage(key);
+        if (page is null)
         {
             key = "Processes";
-            page = _pages[key];
+            page = GetOrCreatePage(key)!;
         }
 
         if (_currentPage is not null)

@@ -20,6 +20,10 @@ internal sealed class ProcessSampler : IDisposable
     private readonly record struct CounterSample(ulong CpuTime100ns, ulong IoBytes);
     private sealed record FileInfoEntry(string Description, string Company);
 
+    // Affinity rarely changes, so it is re-read every few seconds instead of opening every
+    // process on every Details tick. Changes made through the Set affinity dialog invalidate it.
+    private static readonly long AffinityRefreshTicks = Stopwatch.Frequency * 5;
+
     // Immutable per process lifetime, so resolved once per (pid, create time) instead of per tick.
     private sealed class ProcessIdentity
     {
@@ -30,6 +34,8 @@ internal sealed class ProcessSampler : IDisposable
         public string CommandLine = "";
         public bool PathResolved;
         public bool DetailsResolved;
+        public string Affinity = "";
+        public long AffinityDueAt;
     }
 
     public IReadOnlyList<ProcessRow> Sample(bool includeDetails = false)
@@ -72,7 +78,7 @@ internal sealed class ProcessSampler : IDisposable
                     }
                 }
 
-                rows.Add(BuildRow(entry, key, cpuPercent, diskBytesPerSecond, hungPids, includeDetails));
+                rows.Add(BuildRow(entry, key, cpuPercent, diskBytesPerSecond, hungPids, includeDetails, now));
             }
 
             _nextCounters = _lastCounters;
@@ -88,7 +94,8 @@ internal sealed class ProcessSampler : IDisposable
         double cpuPercent,
         double diskBytesPerSecond,
         HashSet<int> hungPids,
-        bool includeDetails)
+        bool includeDetails,
+        long now)
     {
         if (!_identities.TryGetValue(key, out ProcessIdentity? identity))
         {
@@ -97,10 +104,9 @@ internal sealed class ProcessSampler : IDisposable
         }
 
         identity.Name ??= _reader.ReadName(entry);
-        string affinity = "";
         bool canOpen = entry.ProcessId > 0;
-        bool needsStatic = canOpen && (!identity.PathResolved || (includeDetails && !identity.DetailsResolved));
-        if (needsStatic || (canOpen && includeDetails))
+        bool affinityDue = includeDetails && now >= identity.AffinityDueAt;
+        if (canOpen && (!identity.PathResolved || (includeDetails && !identity.DetailsResolved) || affinityDue))
         {
             using SafeNativeHandle process = NativeMethods.OpenProcess(
                 NativeMethods.ProcessQueryLimitedInformation, false, entry.ProcessId);
@@ -110,17 +116,19 @@ internal sealed class ProcessSampler : IDisposable
                 identity.PathResolved = true;
             }
 
-            if (includeDetails)
+            if (includeDetails && !identity.DetailsResolved)
             {
-                if (!identity.DetailsResolved)
-                {
-                    identity.UserName = NativeMethods.QueryProcessUserName(process);
-                    identity.Architecture = NativeMethods.QueryProcessArchitecture(process);
-                    identity.CommandLine = NativeMethods.QueryProcessCommandLine(process) ?? "";
-                    identity.DetailsResolved = true;
-                }
+                identity.UserName = NativeMethods.QueryProcessUserName(process);
+                identity.Architecture = NativeMethods.QueryProcessArchitecture(process);
+                identity.CommandLine = NativeMethods.QueryProcessCommandLine(process) ?? "";
+                identity.DetailsResolved = true;
+            }
 
-                affinity = NativeMethods.QueryAffinity(process);
+            if (affinityDue)
+            {
+                identity.Affinity = NativeMethods.QueryAffinity(process);
+                // Staggered by PID so the re-reads do not all land on the same tick.
+                identity.AffinityDueAt = now + AffinityRefreshTicks + (entry.ProcessId % 64) * (AffinityRefreshTicks / 64);
             }
         }
 
@@ -143,7 +151,8 @@ internal sealed class ProcessSampler : IDisposable
             identity.Name,
             status,
             cpuPercent,
-            entry.WorkingSetBytes,
+            // Suspended (frozen UWP) processes count as 0, as in Task Manager: their pages can be reclaimed.
+            entry.IsSuspended ? 0 : entry.PrivateWorkingSetBytes,
             diskBytesPerSecond,
             entry.ThreadCount,
             entry.HandleCount,
@@ -155,8 +164,23 @@ internal sealed class ProcessSampler : IDisposable
             company,
             identity.CommandLine,
             PriorityName(entry.BasePriority),
-            affinity,
+            includeDetails ? identity.Affinity : "",
             entry.CreateTime);
+    }
+
+    /// <summary>Makes the next sample re-read the processor affinity of <paramref name="processId"/>.</summary>
+    public void InvalidateAffinity(int processId)
+    {
+        lock (_lock)
+        {
+            foreach ((ProcessKey key, ProcessIdentity identity) in _identities)
+            {
+                if (key.ProcessId == processId)
+                {
+                    identity.AffinityDueAt = 0;
+                }
+            }
+        }
     }
 
     private void PruneIdentities(Dictionary<ProcessKey, CounterSample> liveKeys)

@@ -11,7 +11,7 @@ Target: Windows 11 Task Manager behavior on Windows 11 x64. Status values track 
 | PID | Done | NtQuerySystemInformation snapshot | Direct process ID. |
 | Process status | Done | Snapshot thread states + IsHungAppWindow | Running, not responding, and suspended (all threads wait-suspended). |
 | CPU percent | Done | Snapshot kernel+user time deltas | Keyed by PID plus create time to survive PID reuse. |
-| Memory usage | Done | Snapshot working set | Access denied rows degrade gracefully. |
+| Memory usage | Done | Snapshot private working set | Matches Task Manager's Memory (active private working set): the private working set, or 0 while a process is suspended. Used by Processes, Details, and the Users rollup; no handle opens needed. |
 | Disk throughput per process | Partial | Snapshot I/O transfer counters | Sortable process I/O byte delta with no per-process handle opens; exact Task Manager disk-only accounting likely requires ETW. |
 | Network throughput per process | Not possible yet | ETW candidate | Public low-overhead per-process accounting is limited. |
 | GPU usage per process | Not possible yet | PDH GPU Engine counters candidate | Not implemented; counter names vary by OS/GPU driver. |
@@ -39,8 +39,8 @@ Target: Windows 11 Task Manager behavior on Windows 11 x64. Status values track 
 | Network adapter pages | Partial | NetworkInterface byte deltas | Sidebar/detail throughput shown; exact Task Manager adapter details are not complete. |
 | GPU performance pages | Not possible yet | PDH GPU counters candidate | Not implemented in first pass. |
 | Update speed | Done | App setting + sampler interval | Paused/low/normal/high. |
-| Startup apps page | Done | Registry + startup folders | HKCU/HKLM Run and startup folders. |
-| Startup enabled/disabled | Partial | Conservative move/restore | FastTaskMgr can toggle supported entries; StartupApproved parity is not complete. |
+| Startup apps page | Done | Registry + startup folders + package manifests | HKCU Run, HKLM Run (64-bit and 32-bit WOW6432Node), the user and common startup folders, and packaged (Store/MSIX) app startup tasks. Entries are named after their program's file description, falling back to the file name (a shortcut uses its target; a packaged app uses its manifest). Version strings are read the way Explorer reads them, so files that FileVersionInfo reads as blank still get a name and publisher. When the program is missing, Windows shows no name; FastTaskMgr shows the entry's own name. |
+| Startup enabled/disabled | Done | Explorer\StartupApproved (Run, Run32, StartupFolder); AppModel\SystemAppData StartupTaskState for packaged apps | Reads and writes the same values as Task Manager and Settings; changing an all-users entry needs elevation, and packaged tasks set by policy are read-only. Entries disabled by older FastTaskMgr versions (moved values, `.disabled` files) still show as disabled, and enabling one restores it. Settings also marks entries whose program file is missing as disabled when its Startup page opens; FastTaskMgr shows the stored state. |
 | Startup impact | Not possible yet | Local heuristic/history candidate | Exact Windows impact source is undocumented. |
 | Users page | Done | WTSEnumerateSessions + snapshot session IDs | Per-session process count, CPU, and memory rollup with disconnect/sign off actions. |
 | Details page shell | Done | WinForms virtual list | Flat process table. |
@@ -50,7 +50,7 @@ Target: Windows 11 Task Manager behavior on Windows 11 x64. Status values track 
 | Command line | Done | NtQueryInformationProcess(ProcessCommandLineInformation) | Cached per process; blank for protected/elevated targets. |
 | UAC virtualization | Not possible yet | Token APIs candidate | Not implemented in first pass. |
 | Priority | Done | Snapshot base priority / SetPriorityClass | Setting may need elevation. |
-| Affinity | Done | Get/SetProcessAffinityMask | Displayed and editable via the affinity dialog. |
+| Affinity | Done | Get/SetProcessAffinityMask | Displayed and editable via the affinity dialog. Re-read every 5-10 seconds per process, and right after the dialog changes it. |
 | Handles/threads | Done | NtQuerySystemInformation snapshot | Per-process counts for every row. |
 | End process | Needs elevation | OpenProcess + TerminateProcess | Works when permitted. |
 | End process tree | Done | Parent PID descendant walk | Ends the target and all live descendants; protected targets may deny access. |

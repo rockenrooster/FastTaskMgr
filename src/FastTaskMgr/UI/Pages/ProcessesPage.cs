@@ -17,7 +17,7 @@ internal sealed class ProcessesPage : PageBase
             new("Name", 180, row => row.Name),
             new("Status", 120, row => row.Status),
             new("CPU", 78, row => FormatUtil.Percent(row.CpuPercent), row => row.CpuPercent),
-            new("Memory", 105, row => FormatUtil.Bytes(row.WorkingSetBytes), row => row.WorkingSetBytes),
+            new("Memory", 105, row => FormatUtil.Bytes(row.MemoryBytes), row => row.MemoryBytes),
             new("Disk", 96, row => $"{FormatUtil.Bytes((long)row.DiskBytesPerSecond)}/s", row => row.DiskBytesPerSecond),
             new("PID", 72, row => row.ProcessId.ToString(), row => row.ProcessId),
             new("Threads", 78, row => row.ThreadCount.ToString(), row => row.ThreadCount),

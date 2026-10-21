@@ -19,14 +19,12 @@ internal sealed class PerformancePage : PageBase
     private readonly BufferedFlowLayoutPanel _detailStats = new();
     private readonly Dictionary<string, List<double>> _history = [];
     private readonly Dictionary<string, PerfTile> _tiles = [];
-    private readonly Dictionary<int, GraphControl> _cpuCoreGraphs = [];
     private readonly Dictionary<string, GraphControl> _diskMemberGraphs = [];
     private TableLayoutPanel? _memberGrid;
     private IReadOnlyList<PerfItem> _currentItems = [];
     private IReadOnlyList<StatItem> _currentStats = [];
     private GraphControl? _detailGraph;
-    private TableLayoutPanel? _cpuGrid;
-    private int _cpuGridColumns;
+    private GraphGridControl? _cpuGrid;
     private string _selectedKey = "cpu";
     private PerformanceSample? _latest;
 
@@ -323,60 +321,28 @@ internal sealed class PerformancePage : PageBase
 
         _detailGraph = null;
         _cpuGrid = null;
-        _cpuCoreGraphs.Clear();
         _memberGrid = null;
         _diskMemberGraphs.Clear();
     }
 
+    // One control draws every core's graph: a control per core meant dozens of separate paints
+    // on every tick.
     private void RenderCpuCoreGraphs(PerformanceSample sample)
     {
         int count = Math.Max(1, sample.CpuCorePercents.Count);
-        int columns = CpuGridColumns(count);
-        int rows = (int)Math.Ceiling(count / (double)columns);
-
-        if (_cpuGrid is null || !_detailHost.Controls.Contains(_cpuGrid) || _cpuCoreGraphs.Count != count || _cpuGridColumns != columns)
+        if (_cpuGrid is null || !_detailHost.Controls.Contains(_cpuGrid))
         {
             ClearDetailHost();
-            _cpuGridColumns = columns;
-            _cpuGrid = new TableLayoutPanel
+            _cpuGrid = new GraphGridControl
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = columns,
-                RowCount = rows,
-                Padding = new Padding(0)
+                LineColor = CpuColor,
+                FillColor = Color.FromArgb(48, CpuColor)
             };
-
-            for (int column = 0; column < columns; column++)
-            {
-                _cpuGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / columns));
-            }
-
-            for (int row = 0; row < rows; row++)
-            {
-                _cpuGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / rows));
-            }
-
-            for (int index = 0; index < count; index++)
-            {
-                GraphControl graph = new()
-                {
-                    Dock = DockStyle.Fill,
-                    Margin = new Padding(2),
-                    Caption = $"CPU {index}",
-                    LineColor = CpuColor,
-                    FillColor = Color.FromArgb(48, CpuColor)
-                };
-                _cpuCoreGraphs[index] = graph;
-                _cpuGrid.Controls.Add(graph, index % columns, index / columns);
-            }
-
             _detailHost.Controls.Add(_cpuGrid);
         }
 
-        for (int index = 0; index < count; index++)
-        {
-            _cpuCoreGraphs[index].SetSamples(GetHistory($"cpu-core:{index}"));
-        }
+        _cpuGrid.SetGraphs(count, CpuGridColumns(count), index => $"CPU {index}", index => GetHistory($"cpu-core:{index}"));
     }
 
     private void RenderDiskMemberGraphs(DiskPerformanceSample disk)

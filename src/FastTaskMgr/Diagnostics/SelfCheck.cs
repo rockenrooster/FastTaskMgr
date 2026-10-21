@@ -35,7 +35,8 @@ internal static class SelfCheck
         Core.Processes.ProcessRow? self = rows.FirstOrDefault(row => row.ProcessId == Environment.ProcessId);
         return rows.Count > 0
             && self is not null
-            && self.WorkingSetBytes > 10 * 1024 * 1024
+            // Private working set: a fresh process holds only a few MB, but KB or page counts would fail.
+            && self.MemoryBytes > 1024 * 1024
             && self.ThreadCount > 0
             && !string.IsNullOrEmpty(self.Path)
             && !string.IsNullOrEmpty(self.UserName)

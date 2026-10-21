@@ -21,7 +21,7 @@ internal sealed class DetailsPage : PageBase
             new("Status", 112, row => row.Status),
             new("User", 170, row => row.UserName ?? ""),
             new("CPU", 72, row => FormatUtil.Percent(row.CpuPercent), row => row.CpuPercent),
-            new("Memory", 102, row => FormatUtil.Bytes(row.WorkingSetBytes), row => row.WorkingSetBytes),
+            new("Memory", 102, row => FormatUtil.Bytes(row.MemoryBytes), row => row.MemoryBytes),
             new("Arch", 70, row => row.Architecture),
             new("Priority", 105, row => row.Priority),
             new("Affinity", 92, row => row.Affinity),
@@ -126,7 +126,7 @@ internal sealed class DetailsPage : PageBase
         }
 
         menu.Items.Add(priority);
-        menu.Items.Add("Set affinity", null, (_, _) => WithSelected(row => Dialogs.AffinityDialog.Show(this, row.ProcessId, row.Name), "Set affinity"));
+        menu.Items.Add("Set affinity", null, (_, _) => WithSelected(SetAffinity, "Set affinity"));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Open file location", null, (_, _) => WithSelected(ProcessActions.OpenFileLocation, "Open location"));
         menu.Items.Add("Properties", null, (_, _) => WithSelected(ProcessActions.ShowProperties, "Properties"));
@@ -248,6 +248,16 @@ internal sealed class DetailsPage : PageBase
         catch (Exception ex)
         {
             MessageBox.Show(this, ex.Message, "Set priority", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    // The sampler caches affinity between re-reads, so show the new mask right away.
+    private void SetAffinity(ProcessRow row)
+    {
+        if (Dialogs.AffinityDialog.Show(this, row.ProcessId, row.Name))
+        {
+            State.Processes.InvalidateAffinity(row.ProcessId);
+            _ = RequestRefreshAsync();
         }
     }
 

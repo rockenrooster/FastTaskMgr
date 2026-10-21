@@ -10,12 +10,14 @@ internal sealed class VirtualTable<T> : ListView
     private readonly IReadOnlyList<TableColumn<T>> _columns;
     private readonly Func<T, object?> _keySelector;
     private IReadOnlyList<T> _rows = [];
-    // WinForms raises RetrieveVirtualItem for the row and again for every owner-drawn cell
-    // (plus hit tests), so building the item on each request formatted every column ~40 times
-    // per visible row per repaint. Items are cached until the next SetRows.
+    // Rows are formatted once and reused by painting, change detection and the hit tests that
+    // raise RetrieveVirtualItem. Items are cached until the next SetRows.
     private ListViewItem?[] _itemCache = [];
-    private SolidBrush? _backBrush;
-    private SolidBrush? _hoverBrush;
+    private readonly int[] _paintColumnWidths;
+    private IntPtr _paintFont;
+    private int _paintLineHeight;
+    private int _textLeftMargin;
+    private int _textRightMargin;
     private int _sortColumn;
     private bool _sortDescending;
     private int _hotIndex = -1;
@@ -30,11 +32,11 @@ internal sealed class VirtualTable<T> : ListView
         GridLines = true;
         HideSelection = false;
         MultiSelect = true;
-        OwnerDraw = true;
         UseCompatibleStateImageBehavior = false;
         View = View.Details;
         VirtualMode = true;
         DoubleBuffered = true;
+        _paintColumnWidths = new int[columns.Count];
 
         foreach (TableColumn<T> column in columns)
         {
@@ -81,6 +83,13 @@ internal sealed class VirtualTable<T> : ListView
     {
         const int lvmSetItemCount = 0x102F;
         const int lvsicfNoScroll = 0x2;
+        const int wmReflectNotify = 0x204E;
+        if (m.Msg == wmReflectNotify && ListViewNative.IsCustomDraw(m.LParam))
+        {
+            m.Result = CustomDraw(m.LParam);
+            return;
+        }
+
         if (m.Msg == lvmSetItemCount)
         {
             // WinForms sends this without LVSICF_NOSCROLL, and on count changes the native
@@ -288,65 +297,129 @@ internal sealed class VirtualTable<T> : ListView
         return item;
     }
 
-    protected override void OnDrawColumnHeader(DrawListViewColumnHeaderEventArgs e)
+    // Rows are painted with GDI straight onto the list view's DC from its custom-draw
+    // notification. WinForms' owner-draw path built a Graphics object and fetched the item
+    // several times for every cell, which cost more than the drawing itself.
+    private IntPtr CustomDraw(IntPtr notification)
     {
-        e.DrawDefault = true;
-        base.OnDrawColumnHeader(e);
-    }
-
-    protected override void OnDrawSubItem(DrawListViewSubItemEventArgs e)
-    {
-        bool selected = e.Item?.Selected == true;
-        Brush background = selected ? SystemBrushes.Highlight : e.ItemIndex == _hotIndex ? HoverBrush() : BackBrush();
-        Color textColor = selected ? SystemColors.HighlightText : ForeColor;
-        e.Graphics.FillRectangle(background, e.Bounds);
-        Rectangle textBounds = new(e.Bounds.Left + 4, e.Bounds.Top, Math.Max(0, e.Bounds.Width - 8), e.Bounds.Height);
-        TextRenderer.DrawText(
-            e.Graphics,
-            e.SubItem?.Text ?? "",
-            Font,
-            textBounds,
-            textColor,
-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
-        // No manual grid lines: the native GridLines pass draws over owner-drawn cells, and the
-        // GDI+ DrawLine calls that duplicated it were the most expensive part of each cell.
-        base.OnDrawSubItem(e);
-    }
-
-    // Brushes follow BackColor (theme switches); cached so cell painting allocates no GDI+ objects.
-    private SolidBrush BackBrush()
-    {
-        if (_backBrush is null || _backBrush.Color != BackColor)
+        ListViewNative.NMCUSTOMDRAW draw = Marshal.PtrToStructure<ListViewNative.NMCUSTOMDRAW>(notification);
+        switch (draw.DrawStage)
         {
-            _backBrush?.Dispose();
-            _backBrush = new SolidBrush(BackColor);
+            case ListViewNative.CddsPrePaint:
+                PreparePaint(draw.Hdc);
+                return ListViewNative.CdrfNotifyItemDraw;
+            case ListViewNative.CddsItemPrePaint:
+                DrawRow(draw.Hdc, (int)draw.ItemSpec);
+                return ListViewNative.CdrfSkipDefault;
+            default:
+                return ListViewNative.CdrfDoDefault;
+        }
+    }
+
+    private void PreparePaint(IntPtr hdc)
+    {
+        for (int index = 0; index < _paintColumnWidths.Length; index++)
+        {
+            _paintColumnWidths[index] = (int)ListViewNative.SendMessage(Handle, ListViewNative.LvmGetColumnWidth, index, 0);
         }
 
-        return _backBrush;
-    }
-
-    private SolidBrush HoverBrush()
-    {
-        Color hoverBackColor = BackColor.GetBrightness() < 0.5f ? DarkHoverBackColor : LightHoverBackColor;
-        if (_hoverBrush is null || _hoverBrush.Color != hoverBackColor)
+        IntPtr font = ListViewNative.SendMessage(Handle, ListViewNative.WmGetFont, 0, 0);
+        if (font == _paintFont && _paintLineHeight > 0)
         {
-            _hoverBrush?.Dispose();
-            _hoverBrush = new SolidBrush(hoverBackColor);
+            return;
         }
 
-        return _hoverBrush;
+        // The line height and padding TextRenderer derives from the font, so text lands where
+        // the TextRenderer-based cells put it.
+        _paintFont = font;
+        IntPtr previous = ListViewNative.SelectObject(hdc, font);
+        _ = ListViewNative.GetTextMetrics(hdc, out ListViewNative.TEXTMETRIC metrics);
+        _ = ListViewNative.SelectObject(hdc, previous);
+        _paintLineHeight = metrics.Height;
+        float overhang = metrics.Height / 6f;
+        _textLeftMargin = (int)Math.Ceiling(overhang);
+        _textRightMargin = (int)Math.Ceiling(overhang * 1.5f);
     }
 
-    protected override void Dispose(bool disposing)
+    private void DrawRow(IntPtr hdc, int index)
     {
-        if (disposing)
+        ListViewNative.RECT row = new() { Left = ListViewNative.LvirBounds };
+        if (ListViewNative.SendMessage(Handle, ListViewNative.LvmGetItemRect, index, ref row) == 0)
         {
-            _backBrush?.Dispose();
-            _hoverBrush?.Dispose();
+            return;
         }
 
-        base.Dispose(disposing);
+        bool selected = (ListViewNative.SendMessage(Handle, ListViewNative.LvmGetItemState, index, ListViewNative.LvisSelected) & ListViewNative.LvisSelected) != 0;
+        Color back = selected ? SystemColors.Highlight : index == _hotIndex ? HoverBackColor() : BackColor;
+        _ = ListViewNative.SetDCBrushColor(hdc, ColorTranslator.ToWin32(back));
+        _ = ListViewNative.FillRect(hdc, ref row, ListViewNative.DcBrush);
+        if ((uint)index >= (uint)_rows.Count)
+        {
+            return; // stale request from the native control while the row count changes
+        }
+
+        ListViewItem item = ItemAt(index);
+        IntPtr previousFont = ListViewNative.SelectObject(hdc, _paintFont);
+        int previousColor = ListViewNative.SetTextColor(hdc, ColorTranslator.ToWin32(selected ? SystemColors.HighlightText : ForeColor));
+        int previousMode = ListViewNative.SetBkMode(hdc, ListViewNative.BkModeTransparent);
+        int clientWidth = ClientSize.Width;
+        int left = row.Left;
+        for (int column = 0; column < _paintColumnWidths.Length && left < clientWidth; column++)
+        {
+            int width = _paintColumnWidths[column];
+            if (left + width > 0)
+            {
+                DrawCell(hdc, item.SubItems[column].Text, left, row.Top, width, row.Bottom - row.Top);
+            }
+
+            left += width;
+        }
+
+        _ = ListViewNative.SetBkMode(hdc, previousMode);
+        _ = ListViewNative.SetTextColor(hdc, previousColor);
+        _ = ListViewNative.SelectObject(hdc, previousFont);
+        // No manual grid lines: the native GridLines pass draws over the rows afterwards.
     }
+
+    // Matches the TextRenderer call cells used before (Left | VerticalCenter | EndEllipsis |
+    // NoPrefix inside the cell inset by 4px), including how TextRenderer centers a line itself
+    // instead of passing DT_SINGLELINE.
+    private void DrawCell(IntPtr hdc, string text, int left, int top, int width, int height)
+    {
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        ListViewNative.RECT bounds = new() { Left = left + 4, Top = top, Right = left + 4 + Math.Max(0, width - 8), Bottom = top + height };
+        if (_paintLineHeight <= height && text.AsSpan().IndexOfAny('\r', '\n') < 0)
+        {
+            bounds.Top = top + height / 2 - _paintLineHeight / 2;
+            bounds.Bottom = bounds.Top + height;
+        }
+
+        // Most cells are short ASCII that fits. ExtTextOut puts those pixels exactly where
+        // DrawTextEx would at a fraction of the cost, since DrawTextEx lays each line out again.
+        int available = bounds.Right - bounds.Left - _textLeftMargin - _textRightMargin;
+        if (!text.AsSpan().ContainsAnyExceptInRange(' ', '~')
+            && ListViewNative.GetTextExtentPoint32(hdc, text, text.Length, out ListViewNative.SIZE size)
+            && size.Width <= available)
+        {
+            _ = ListViewNative.ExtTextOut(hdc, bounds.Left + _textLeftMargin, bounds.Top, 0, IntPtr.Zero, text, text.Length, IntPtr.Zero);
+            return;
+        }
+
+        // Ellipsis, line breaks and other scripts: let DrawTextEx lay the text out.
+        ListViewNative.DRAWTEXTPARAMS margins = new()
+        {
+            Size = ListViewNative.DrawTextParamsSize,
+            LeftMargin = _textLeftMargin,
+            RightMargin = _textRightMargin
+        };
+        _ = ListViewNative.DrawTextEx(hdc, text, text.Length, ref bounds, ListViewNative.DtVCenter | ListViewNative.DtEndEllipsis | ListViewNative.DtNoPrefix, ref margins);
+    }
+
+    private Color HoverBackColor() => BackColor.GetBrightness() < 0.5f ? DarkHoverBackColor : LightHoverBackColor;
 
     protected override void OnColumnClick(ColumnClickEventArgs e)
     {
@@ -475,13 +548,138 @@ internal sealed class VirtualTable<T> : ListView
 file static class ListViewNative
 {
     public const int SbHorz = 0;
+    public const int LvmGetItemRect = 0x100E;
     public const int LvmScroll = 0x1014;
+    public const int LvmGetColumnWidth = 0x101D;
     public const int LvmGetTopIndex = 0x1027;
     public const int LvmGetCountPerPage = 0x1028;
+    public const int LvmGetItemState = 0x102C;
+    public const int LvirBounds = 0;
+    public const int LvisSelected = 0x2;
+    public const int WmGetFont = 0x0031;
+    public const int CddsPrePaint = 0x1;
+    public const int CddsItemPrePaint = 0x10001;
+    public const nint CdrfDoDefault = 0x0;
+    public const nint CdrfSkipDefault = 0x4;
+    public const nint CdrfNotifyItemDraw = 0x20;
+    public const int BkModeTransparent = 1;
+    public const int DtVCenter = 0x4;
+    public const int DtNoPrefix = 0x800;
+    public const int DtEndEllipsis = 0x8000;
+    private const int NmCustomDraw = -12;
+    public static readonly IntPtr DcBrush = GetStockObject(18);
+    public static readonly int DrawTextParamsSize = Marshal.SizeOf<DRAWTEXTPARAMS>();
+
+    // NMHDR.code follows the sender's window handle and control id.
+    public static bool IsCustomDraw(IntPtr notification) => Marshal.ReadInt32(notification, 2 * IntPtr.Size) == NmCustomDraw;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct NMHDR
+    {
+        public IntPtr HwndFrom;
+        public IntPtr IdFrom;
+        public int Code;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct NMCUSTOMDRAW
+    {
+        public NMHDR Header;
+        public int DrawStage;
+        public IntPtr Hdc;
+        public RECT Bounds;
+        public IntPtr ItemSpec;
+        public int ItemState;
+        public IntPtr ItemLParam;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SIZE
+    {
+        public int Width;
+        public int Height;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DRAWTEXTPARAMS
+    {
+        public int Size;
+        public int TabLength;
+        public int LeftMargin;
+        public int RightMargin;
+        public int LengthDrawn;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct TEXTMETRIC
+    {
+        public int Height;
+        public int Ascent;
+        public int Descent;
+        public int InternalLeading;
+        public int ExternalLeading;
+        public int AveCharWidth;
+        public int MaxCharWidth;
+        public int Weight;
+        public int Overhang;
+        public int DigitizedAspectX;
+        public int DigitizedAspectY;
+        public ushort FirstChar;
+        public ushort LastChar;
+        public ushort DefaultChar;
+        public ushort BreakChar;
+        public byte Italic;
+        public byte Underlined;
+        public byte StruckOut;
+        public byte PitchAndFamily;
+        public byte CharSet;
+    }
 
     [DllImport("user32.dll")]
     public static extern int GetScrollPos(IntPtr hWnd, int nBar);
 
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, ref RECT lParam);
+
+    [DllImport("user32.dll")]
+    public static extern int FillRect(IntPtr hdc, ref RECT rect, IntPtr brush);
+
+    [DllImport("user32.dll", EntryPoint = "DrawTextExW", CharSet = CharSet.Unicode)]
+    public static extern int DrawTextEx(IntPtr hdc, string text, int length, ref RECT rect, int format, ref DRAWTEXTPARAMS parameters);
+
+    [DllImport("gdi32.dll", EntryPoint = "ExtTextOutW", CharSet = CharSet.Unicode)]
+    public static extern bool ExtTextOut(IntPtr hdc, int x, int y, int options, IntPtr rect, string text, int length, IntPtr dx);
+
+    [DllImport("gdi32.dll", EntryPoint = "GetTextExtentPoint32W", CharSet = CharSet.Unicode)]
+    public static extern bool GetTextExtentPoint32(IntPtr hdc, string text, int length, out SIZE size);
+
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr SelectObject(IntPtr hdc, IntPtr gdiObject);
+
+    [DllImport("gdi32.dll")]
+    public static extern int SetTextColor(IntPtr hdc, int color);
+
+    [DllImport("gdi32.dll")]
+    public static extern int SetBkMode(IntPtr hdc, int mode);
+
+    [DllImport("gdi32.dll")]
+    public static extern int SetDCBrushColor(IntPtr hdc, int color);
+
+    [DllImport("gdi32.dll", EntryPoint = "GetTextMetricsW")]
+    public static extern bool GetTextMetrics(IntPtr hdc, out TEXTMETRIC metrics);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr GetStockObject(int index);
 }

@@ -86,6 +86,7 @@ internal sealed class StartupPage : PageBase
         {
             rows = rows.Where(row =>
                 row.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase)
+                || row.EntryName.Contains(_filter, StringComparison.OrdinalIgnoreCase)
                 || row.Publisher.Contains(_filter, StringComparison.OrdinalIgnoreCase)
                 || row.Command.Contains(_filter, StringComparison.OrdinalIgnoreCase)
                 || row.Source.Contains(_filter, StringComparison.OrdinalIgnoreCase));
@@ -106,6 +107,10 @@ internal sealed class StartupPage : PageBase
         {
             State.Startup.SetEnabled(item, enabled);
             _ = RequestRefreshAsync();
+        }
+        catch (Exception ex) when (item.Scope != StartupScope.CurrentUser && ex is UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            MessageBox.Show(this, "Run FastTaskMgr as administrator to change startup apps that run for all users.", "Startup apps", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         catch (Exception ex)
         {

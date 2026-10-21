@@ -86,7 +86,7 @@ internal sealed class UsersPage : PageBase
         foreach (ProcessRow process in processes)
         {
             (int count, double cpu, long memory) = rollup.GetValueOrDefault(process.SessionId);
-            rollup[process.SessionId] = (count + 1, cpu + process.CpuPercent, memory + process.WorkingSetBytes);
+            rollup[process.SessionId] = (count + 1, cpu + process.CpuPercent, memory + process.MemoryBytes);
         }
 
         List<UserSessionRow> rows = new(sessions.Count);
