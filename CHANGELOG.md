@@ -6,9 +6,10 @@ All notable changes to FastTaskMgr are documented here.
 
 - Add upcoming user-visible changes here before tagging a release.
 
+## 0.1.0.42 - 2026-10-21
+
 ### Added
 - The Startup apps page lists packaged (Microsoft Store/MSIX) apps that start at sign-in, such as Microsoft Teams, Terminal and Phone Link, and can enable or disable them the same way Windows Settings does.
-
 ### Changed
 - Pages only refresh while they are visible: sampling pauses while the window is minimized or hidden in the tray, and saving settings no longer starts background refresh timers for every page.
 - Process tables repaint only the rows whose values changed, and cells no longer redraw the grid lines a second time; a refresh where nothing changed no longer repaints the table at all.
