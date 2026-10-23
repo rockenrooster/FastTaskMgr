@@ -29,6 +29,13 @@ internal abstract class PageBase : UserControl
     }
 
     protected AppState State { get; }
+
+    /// <summary>True while this is the page shown in the main window.</summary>
+    protected bool IsActive => _active;
+
+    /// <summary>True while the main window is minimized or hidden in the tray.</summary>
+    protected bool IsSuspended => _suspended;
+
     public abstract string Title { get; }
     public virtual bool UsesSearch => true;
     public virtual void ApplySearch(string searchText) { }
@@ -62,14 +69,22 @@ internal abstract class PageBase : UserControl
 
         _suspended = suspended;
         UpdateRefreshTimer();
-        if (!suspended && _active && _autoRefresh)
+        if (!suspended && _active)
         {
-            _ = RefreshAsync();
+            if (_autoRefresh)
+            {
+                _ = RefreshAsync();
+            }
+
+            OnResume();
         }
     }
 
     protected virtual void OnShow() { }
     protected virtual void OnHide() { }
+
+    /// <summary>Called when the window comes back from minimized or the tray while this page is shown.</summary>
+    protected virtual void OnResume() { }
 
     /// <summary>
     /// Registers the page's data load. With autoRefresh it also runs on the update-speed

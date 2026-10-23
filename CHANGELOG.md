@@ -6,6 +6,9 @@ All notable changes to FastTaskMgr are documented here.
 
 - Add upcoming user-visible changes here before tagging a release.
 
+### Changed
+- The Performance page keeps sampling in the background at all times, while other pages are open and while the window is minimized or hidden in the tray, so its graphs always show the last two minutes, like Task Manager. Background sampling costs about 1 ms per update; other pages still pause while minimized.
+
 ## 0.1.0.42 - 2026-10-21
 
 ### Added

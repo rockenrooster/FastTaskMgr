@@ -56,26 +56,10 @@ internal sealed class MainForm : Form
     protected override async void OnShown(EventArgs e)
     {
         base.OnShown(e);
-        StartPerformanceWarmup();
+        // Performance history is collected from startup, whichever page is open and even while
+        // minimized or in the tray.
+        _state.PerformanceMonitor.Start();
         await StartLazyUpdateCheckAsync();
-    }
-
-    // The first PDH touch costs over a second. Pay it here in the background so the
-    // Performance page has warm counters and a cached sample by the time it is opened.
-    private void StartPerformanceWarmup()
-    {
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                _ = _state.Performance.Sample();
-                await Task.Delay(1000);
-                _ = _state.Performance.Sample();
-            }
-            catch
-            {
-            }
-        });
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -125,7 +109,8 @@ internal sealed class MainForm : Form
         UpdateSuspended();
     }
 
-    // Nothing is on screen while minimized or hidden in the tray, so live pages stop sampling.
+    // Nothing is on screen while minimized or hidden in the tray, so live pages stop refreshing
+    // (performance history keeps sampling in the background).
     private void UpdateSuspended()
     {
         if (!IsHandleCreated)

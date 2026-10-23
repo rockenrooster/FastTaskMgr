@@ -13,10 +13,12 @@ internal sealed class AppState : IDisposable
     private readonly Lazy<ServiceRepository> _services = new(() => new ServiceRepository());
     private readonly Lazy<StartupRepository> _startup = new(() => new StartupRepository());
     private readonly Lazy<UpdateService> _updates = new(() => new UpdateService());
+    private readonly Lazy<PerformanceMonitor> _performanceMonitor;
 
     private AppState(AppSettings settings)
     {
         Settings = settings;
+        _performanceMonitor = new(() => new PerformanceMonitor(this));
     }
 
     public AppSettings Settings { get; }
@@ -25,6 +27,9 @@ internal sealed class AppState : IDisposable
     public ServiceRepository Services => _services.Value;
     public StartupRepository Startup => _startup.Value;
     public UpdateService Updates => _updates.Value;
+
+    /// <summary>Background performance sampling and graph history; create and use on the UI thread.</summary>
+    public PerformanceMonitor PerformanceMonitor => _performanceMonitor.Value;
     public bool IsUpdateAvailable => _updates.IsValueCreated && _updates.Value.LastResult?.IsUpdateAvailable == true;
 
     public event EventHandler? SettingsChanged;
@@ -46,6 +51,11 @@ internal sealed class AppState : IDisposable
     // in-flight background sample before releasing native buffers and PDH handles.
     public void Dispose()
     {
+        if (_performanceMonitor.IsValueCreated)
+        {
+            _performanceMonitor.Value.Dispose();
+        }
+
         if (_processes.IsValueCreated)
         {
             _processes.Value.Dispose();

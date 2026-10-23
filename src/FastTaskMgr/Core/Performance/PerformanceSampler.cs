@@ -57,7 +57,6 @@ internal sealed class PerformanceSampler : IDisposable
     private IntPtr _gpuDedicatedCounter;
     private IntPtr _gpuSharedCounter;
     private IntPtr _compressedPagesCounter;
-    private volatile PerformanceSample? _lastSample;
     private ProcessorPerformanceInformation[] _lastProcessorInfo = [];
     private ulong _lastIdle;
     private ulong _lastKernel;
@@ -68,9 +67,6 @@ internal sealed class PerformanceSampler : IDisposable
         _onNetworkAddressChanged = (_, _) => _networkAdaptersChanged = true;
         _onNetworkAvailabilityChanged = (_, _) => _networkAdaptersChanged = true;
     }
-
-    /// <summary>Last completed sample; lets the Performance page paint instantly on open.</summary>
-    public PerformanceSample? LastSample => _lastSample;
 
     public PerformanceSample Sample(bool fastFirstPaint = false)
     {
@@ -109,7 +105,6 @@ internal sealed class PerformanceSampler : IDisposable
                 SampleDisks(collected),
                 SampleNetworks(),
                 collected ? SampleGpus() : []);
-            _lastSample = sample;
             return sample;
         }
     }

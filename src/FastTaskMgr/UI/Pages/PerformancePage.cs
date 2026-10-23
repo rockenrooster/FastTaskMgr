@@ -17,7 +17,7 @@ internal sealed class PerformancePage : PageBase
     private readonly Label _detailTitle = new();
     private readonly Label _detailSubtitle = new();
     private readonly BufferedFlowLayoutPanel _detailStats = new();
-    private readonly Dictionary<string, List<double>> _history = [];
+    private readonly PerformanceMonitor _monitor;
     private readonly Dictionary<string, PerfTile> _tiles = [];
     private readonly Dictionary<string, GraphControl> _diskMemberGraphs = [];
     private TableLayoutPanel? _memberGrid;
@@ -31,6 +31,10 @@ internal sealed class PerformancePage : PageBase
     public PerformancePage(AppState state)
         : base(state)
     {
+        // Sampling and history live in the monitor, which keeps running while other pages are
+        // shown or the window is minimized; this page only draws, and only while on screen.
+        _monitor = state.PerformanceMonitor;
+        _monitor.Sampled += OnSampled;
         SplitContainer split = new()
         {
             Dock = DockStyle.Fill,
@@ -94,8 +98,6 @@ internal sealed class PerformancePage : PageBase
         _detailStats.AutoScroll = true;
         _detailStats.Resize += (_, _) => ReflowStats();
         detail.Controls.Add(_detailStats, 0, 2);
-
-        SetRefreshAction(RefreshSampleAsync, autoRefresh: true);
     }
 
     public override string Title => "Performance";
@@ -103,12 +105,35 @@ internal sealed class PerformancePage : PageBase
 
     protected override async void OnShow()
     {
-        if (_latest is null && State.Performance.LastSample is { } cached)
+        if (_monitor.Latest is { } latest)
         {
-            RenderSample(cached); // paint instantly from the warm-up sample
+            RenderSample(latest); // paint at once, with the history gathered in the background
         }
 
-        await RefreshAsync();
+        // Before the first sample, or with updates paused (no timer), take one now. Until PDH
+        // is warm, the fast path returns CPU and memory without waiting on it.
+        bool paused = State.Settings.UpdateSpeed == UpdateSpeed.Paused;
+        if (_monitor.Latest is null || paused)
+        {
+            await _monitor.SampleAsync(fastFirstPaint: _monitor.Latest is null && !paused);
+        }
+    }
+
+    private void OnSampled(object? sender, EventArgs e)
+    {
+        if (IsActive && !IsSuspended && !IsDisposed && _monitor.Latest is { } latest)
+        {
+            RenderSample(latest);
+        }
+    }
+
+    // Catch up at once on restore instead of showing the pre-minimize frame until the next tick.
+    protected override void OnResume()
+    {
+        if (_monitor.Latest is { } latest)
+        {
+            RenderSample(latest);
+        }
     }
 
     private static void ConfigureSplitter(SplitContainer split)
@@ -125,50 +150,10 @@ internal sealed class PerformancePage : PageBase
         }
     }
 
-    private async Task RefreshSampleAsync()
-    {
-        bool fastFirstPaint = _latest is null && State.Settings.UpdateSpeed != UpdateSpeed.Paused;
-        PerformanceSample sample = await Task.Run(() => State.Performance.Sample(fastFirstPaint));
-        if (!IsDisposed)
-        {
-            RenderSample(sample);
-        }
-    }
-
     private void RenderSample(PerformanceSample sample)
     {
         _latest = sample;
-        AddHistory("cpu", _latest.CpuPercent);
-        for (int index = 0; index < _latest.CpuCorePercents.Count; index++)
-        {
-            AddHistory($"cpu-core:{index}", _latest.CpuCorePercents[index]);
-        }
-
-        double memoryPercent = _latest.TotalMemoryBytes == 0
-            ? 0
-            : (double)(_latest.TotalMemoryBytes - _latest.AvailableMemoryBytes) / _latest.TotalMemoryBytes * 100;
-        AddHistory("memory", memoryPercent);
-
-        foreach (DiskPerformanceSample disk in _latest.Disks)
-        {
-            AddHistory(disk.Key, Math.Min(100, disk.ActivePercent));
-            foreach (DiskPerformanceSample member in disk.Members ?? [])
-            {
-                AddHistory(member.Key, Math.Min(100, member.ActivePercent));
-            }
-        }
-
-        foreach (NetworkPerformanceSample network in _latest.Networks)
-        {
-            AddHistory(network.Key, network.UtilizationPercent);
-        }
-
-        foreach (GpuPerformanceSample gpu in _latest.Gpus)
-        {
-            AddHistory(gpu.Key, gpu.UtilizationPercent);
-        }
-
-        _currentItems = BuildItems(_latest, memoryPercent);
+        _currentItems = BuildItems(_latest, PerformanceMonitor.MemoryPercent(_latest));
         if (!_currentItems.Any(item => item.Key == _selectedKey))
         {
             _selectedKey = "cpu";
@@ -521,22 +506,7 @@ internal sealed class PerformancePage : PageBase
         }
     }
 
-    private void AddHistory(string key, double value)
-    {
-        if (!_history.TryGetValue(key, out List<double>? samples))
-        {
-            samples = [];
-            _history[key] = samples;
-        }
-
-        samples.Add(Math.Clamp(value, 0, 100));
-        if (samples.Count > 120)
-        {
-            samples.RemoveAt(0);
-        }
-    }
-
-    private IReadOnlyList<double> GetHistory(string key) => _history.TryGetValue(key, out List<double>? values) ? values : [];
+    private IReadOnlyList<double> GetHistory(string key) => _monitor.History(key);
 
     private int SidebarTileWidth()
     {
@@ -616,6 +586,16 @@ internal sealed class PerformancePage : PageBase
         _selectedKey = key;
         RenderSidebar(_currentItems);
         RenderDetail(item);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _monitor.Sampled -= OnSampled;
+        }
+
+        base.Dispose(disposing);
     }
 
     private sealed class PerfTile : UserControl
