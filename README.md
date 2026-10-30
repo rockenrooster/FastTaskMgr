@@ -12,7 +12,7 @@ FastTaskMgr is a fast, lightweight Windows 11 Task Manager alternative built wit
 
 - Processes page with search, sorting, CPU, memory, and process I/O columns, plus end task, end process tree, and go to details.
 - Fast process sampling: one system snapshot call per refresh instead of per-process handle queries.
-- Performance page with CPU, memory, disk, and network tiles and graphs.
+- Performance page with CPU, memory, disk, network, and GPU tiles and graphs, including the live CPU clock, GPU and SSD temperature, and SSD remaining life.
 - Details page with user, architecture, description, company, command line, priority, and affinity, including set priority, set affinity, and end process tree.
 - Users page with per-session process, CPU, and memory rollup plus disconnect and sign off.
 - Services page backed by Service Control Manager APIs, with group column and go to details.

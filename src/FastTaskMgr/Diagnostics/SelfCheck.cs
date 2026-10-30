@@ -1,4 +1,5 @@
 using FastTaskMgr.App;
+using FastTaskMgr.Core.Native;
 using FastTaskMgr.Core.Performance;
 using FastTaskMgr.Core.Updates;
 using System.Security.Cryptography;
@@ -17,9 +18,10 @@ internal static class SelfCheck
             bool hasMemory = state.Performance.Sample().TotalMemoryBytes > 0;
             bool updateTrustWorks = UpdateTrustSelfCheck();
             bool gpuEngineAggregationWorks = GpuEngineAggregationSelfCheck();
+            bool storageHealthParsingWorks = StorageHealthParsingSelfCheck();
             _ = state.Services.ListServices();
             _ = state.Startup.ListStartupItems();
-            return hasProcesses && hasMemory && updateTrustWorks && gpuEngineAggregationWorks ? 0 : 1;
+            return hasProcesses && hasMemory && updateTrustWorks && gpuEngineAggregationWorks && storageHealthParsingWorks ? 0 : 1;
         }
         catch
         {
@@ -56,6 +58,25 @@ internal static class SelfCheck
 
         return UpdateTrust.VerifyManifestSignature(manifestBytes, signature, publicKey)
             && !UpdateTrust.VerifyManifestSignature(tamperedBytes, signature, publicKey);
+    }
+
+    private static bool StorageHealthParsingSelfCheck()
+    {
+        byte[] nvmeLog = new byte[512];
+        nvmeLog[1] = 332 & 0xFF; // 332 K, little endian
+        nvmeLog[2] = 332 >> 8;
+        nvmeLog[5] = 23; // percentage used
+        StorageHealth health = NativeMethods.ParseNvmeHealthLog(nvmeLog);
+        nvmeLog[5] = 120; // past rated endurance
+        byte[] ataPage = new byte[512];
+        BitConverter.GetBytes(0xC000000000000029UL).CopyTo(ataPage, 8); // supported, valid, 41
+
+        return Math.Abs(health.TemperatureCelsius!.Value - 58.85) < 0.01
+            && health.LifeRemainingPercent == 77
+            && NativeMethods.ParseNvmeHealthLog(nvmeLog).LifeRemainingPercent == 0
+            && NativeMethods.ParseNvmeHealthLog(new byte[512]).TemperatureCelsius is null
+            && NativeMethods.ParseAtaStatistic(ataPage, 8) == 41
+            && NativeMethods.ParseAtaStatistic(new byte[512], 8) is null;
     }
 
     private static bool GpuEngineAggregationSelfCheck() =>

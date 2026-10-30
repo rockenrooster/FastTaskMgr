@@ -37,6 +37,7 @@ internal sealed record DiskPerformanceSample(
     long UsedBytes,
     long FreeBytes,
     long TotalBytes,
+    int DiskIndex,
     IReadOnlyList<DiskPerformanceSample>? Members = null);
 
 internal sealed record NetworkPerformanceSample(
@@ -56,5 +57,4 @@ internal sealed record GpuPerformanceSample(
     double UtilizationPercent,
     long DedicatedMemoryBytes,
     long DedicatedMemoryTotalBytes,
-    long SharedMemoryBytes,
-    double? TemperatureCelsius);
+    long SharedMemoryBytes);

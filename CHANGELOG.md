@@ -6,6 +6,17 @@ All notable changes to FastTaskMgr are documented here.
 
 - Add upcoming user-visible changes here before tagging a release.
 
+### Added
+- The Performance page shows GPU temperature, and SSD temperature and remaining life, on the tiles and in the details. Drive pools show them for each member disk. Hard drives are never polled, so a sleeping disk is not woken.
+- CPU temperature appears on systems whose firmware reports an ACPI thermal zone, which covers most laptops and some desktops. It is labeled ACPI because it is a board reading rather than the CPU's own sensor.
+
+### Changed
+- CPU speed now shows the real clock including boost, the same figure as Task Manager, instead of stopping at base speed.
+- Sensors load in the background only while the Performance page is on screen, so they add nothing to startup and values appear as soon as they are ready. A slow drive cannot hold up the page. SSDs are read every 10 seconds, temperatures every 2 seconds.
+
+### Fixed
+- The GPU name no longer ends with a stray character on drivers that store it with an odd length.
+
 ## 0.1.0.43 - 2026-10-23
 
 ### Changed

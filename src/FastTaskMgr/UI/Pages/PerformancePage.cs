@@ -1,4 +1,5 @@
 using FastTaskMgr.App;
+using FastTaskMgr.Core.Native;
 using FastTaskMgr.Core.Performance;
 using FastTaskMgr.UI.Controls;
 
@@ -11,6 +12,7 @@ internal sealed class PerformancePage : PageBase
     private static readonly Color DiskColor = Color.FromArgb(80, 140, 45);
     private static readonly Color NetworkColor = Color.FromArgb(200, 40, 105);
     private static readonly Color GpuColor = Color.FromArgb(120, 65, 220);
+    private const string ReadingText = "Reading...";
 
     private readonly BufferedFlowLayoutPanel _sidebar = new();
     private readonly Panel _detailHost = new();
@@ -18,6 +20,7 @@ internal sealed class PerformancePage : PageBase
     private readonly Label _detailSubtitle = new();
     private readonly BufferedFlowLayoutPanel _detailStats = new();
     private readonly PerformanceMonitor _monitor;
+    private readonly HardwareSensors _sensors;
     private readonly Dictionary<string, PerfTile> _tiles = [];
     private readonly Dictionary<string, GraphControl> _diskMemberGraphs = [];
     private TableLayoutPanel? _memberGrid;
@@ -35,6 +38,9 @@ internal sealed class PerformancePage : PageBase
         // shown or the window is minimized; this page only draws, and only while on screen.
         _monitor = state.PerformanceMonitor;
         _monitor.Sampled += OnSampled;
+        _sensors = state.Sensors;
+        _sensors.Updated += OnSensorsUpdated;
+        state.SettingsChanged += (_, _) => UpdateSensorPolling();
         SplitContainer split = new()
         {
             Dock = DockStyle.Fill,
@@ -105,6 +111,7 @@ internal sealed class PerformancePage : PageBase
 
     protected override async void OnShow()
     {
+        UpdateSensorPolling();
         if (_monitor.Latest is { } latest)
         {
             RenderSample(latest); // paint at once, with the history gathered in the background
@@ -127,12 +134,46 @@ internal sealed class PerformancePage : PageBase
         }
     }
 
+    protected override void OnHide() => UpdateSensorPolling();
+
+    protected override void OnSuspend() => UpdateSensorPolling();
+
     // Catch up at once on restore instead of showing the pre-minimize frame until the next tick.
     protected override void OnResume()
     {
+        UpdateSensorPolling();
         if (_monitor.Latest is { } latest)
         {
             RenderSample(latest);
+        }
+    }
+
+    // Unlike the graphs, these readings have no history, so nothing touches the sensors unless
+    // they are on screen. With updates paused they are read once and then left alone.
+    private void UpdateSensorPolling() =>
+        _sensors.SetActive(IsActive && !IsSuspended, continuous: State.Settings.UpdateSpeed != UpdateSpeed.Paused);
+
+    // Readings arrive on the sensor loop's thread, whenever each one is ready.
+    private void OnSensorsUpdated(object? sender, EventArgs e)
+    {
+        if (!IsHandleCreated)
+        {
+            return;
+        }
+
+        try
+        {
+            BeginInvoke(() =>
+            {
+                if (IsActive && !IsSuspended && !IsDisposed && _latest is not null)
+                {
+                    RenderSample(_latest);
+                }
+            });
+        }
+        catch (InvalidOperationException)
+        {
+            // The window handle is gone (shutting down); nothing left to update.
         }
     }
 
@@ -165,16 +206,17 @@ internal sealed class PerformancePage : PageBase
 
     private PerfItem[] BuildItems(PerformanceSample sample, double memoryPercent)
     {
+        HardwareReadings readings = _sensors.Latest;
         List<PerfItem> items =
         [
-            new("cpu", "CPU", $"{sample.CpuPercent:0}%  {sample.CurrentCpuSpeedGhz:0.00} GHz", sample.CpuPercent, CpuColor),
+            new("cpu", "CPU", $"{sample.CpuPercent:0}%  {sample.CurrentCpuSpeedGhz:0.00} GHz{TemperatureSuffix(readings.CpuTemperatureCelsius)}", sample.CpuPercent, CpuColor),
             new("memory", "Memory", $"{FormatUtil.Bytes(sample.TotalMemoryBytes - sample.AvailableMemoryBytes)} / {FormatUtil.Bytes(sample.TotalMemoryBytes)} ({memoryPercent:0}%)", memoryPercent, MemoryColor)
         ];
 
         items.AddRange(sample.Disks.Select(disk => new PerfItem(
             disk.Key,
             disk.Name,
-            $"Active {disk.ActivePercent:0}%  R: {FormatUtil.Bytes((long)disk.ReadBytesPerSecond)}/s  W: {FormatUtil.Bytes((long)disk.WriteBytesPerSecond)}/s",
+            $"Active {disk.ActivePercent:0}%{TemperatureSuffix(HottestDiskCelsius(disk, readings))}  R: {FormatUtil.Bytes((long)disk.ReadBytesPerSecond)}/s  W: {FormatUtil.Bytes((long)disk.WriteBytesPerSecond)}/s",
             Math.Min(100, disk.ActivePercent),
             DiskColor)));
 
@@ -194,7 +236,7 @@ internal sealed class PerformancePage : PageBase
             items.AddRange(sample.Gpus.Select(gpu => new PerfItem(
                 gpu.Key,
                 gpu.Name,
-                $"{gpu.UtilizationPercent:0}%  {GpuMemoryText(gpu)}",
+                $"{gpu.UtilizationPercent:0}%{TemperatureSuffix(readings.GpuTemperatureCelsius)}  {GpuMemoryText(gpu)}",
                 gpu.UtilizationPercent,
                 GpuColor)));
         }
@@ -257,6 +299,7 @@ internal sealed class PerformancePage : PageBase
                 new("Utilization", $"{_latest.CpuPercent:0}%"),
                 new("Speed", $"{_latest.CurrentCpuSpeedGhz:0.00} GHz"),
                 new("Base speed", $"{_latest.CpuInfo.BaseSpeedGhz:0.00} GHz"),
+                new("Temperature", CpuTemperatureText(_sensors.Latest)),
                 new("Virtualization", _latest.CpuInfo.VirtualizationEnabled ? "Enabled" : "Disabled"),
                 new("Sockets", _latest.CpuInfo.Sockets.ToString()),
                 new("Cores", _latest.CpuInfo.Cores.ToString()),
@@ -382,7 +425,7 @@ internal sealed class PerformancePage : PageBase
         {
             if (_diskMemberGraphs.TryGetValue(member.Key, out GraphControl? graph))
             {
-                graph.Caption = $"{member.Name}   Active {member.ActivePercent:0}%   R: {FormatUtil.Bytes((long)member.ReadBytesPerSecond)}/s   W: {FormatUtil.Bytes((long)member.WriteBytesPerSecond)}/s";
+                graph.Caption = $"{member.Name}   Active {member.ActivePercent:0}%   R: {FormatUtil.Bytes((long)member.ReadBytesPerSecond)}/s   W: {FormatUtil.Bytes((long)member.WriteBytesPerSecond)}/s{DiskHealthSuffix(member, _sensors.Latest)}";
                 graph.SetSamples(GetHistory(member.Key));
             }
         }
@@ -427,11 +470,18 @@ internal sealed class PerformancePage : PageBase
                 new("Write speed", $"{FormatUtil.Bytes((long)disk.WriteBytesPerSecond)}/s"),
                 new("Format", disk.Kind)
             ];
+            HardwareReadings readings = _sensors.Latest;
+            if (readings.Disks.TryGetValue(disk.DiskIndex, out StorageHealth health))
+            {
+                stats.Add(new StatItem("Temperature", TemperatureText(health.TemperatureCelsius)));
+                stats.Add(new StatItem("Life remaining", health.LifeRemainingPercent is { } life ? $"{life}%" : "Unavailable"));
+            }
+
             foreach (DiskPerformanceSample member in disk.Members ?? [])
             {
                 stats.Add(new StatItem(
                     member.Name,
-                    $"{member.ActivePercent:0}%  R {FormatUtil.Bytes((long)member.ReadBytesPerSecond)}/s  W {FormatUtil.Bytes((long)member.WriteBytesPerSecond)}/s"));
+                    $"{member.ActivePercent:0}%  R {FormatUtil.Bytes((long)member.ReadBytesPerSecond)}/s  W {FormatUtil.Bytes((long)member.WriteBytesPerSecond)}/s{DiskHealthSuffix(member, readings)}"));
             }
 
             return stats.ToArray();
@@ -459,7 +509,7 @@ internal sealed class PerformancePage : PageBase
                 new("Utilization", $"{gpu.UtilizationPercent:0}%"),
                 new("Dedicated memory", GpuMemoryText(gpu)),
                 new("Shared memory", FormatUtil.Bytes(gpu.SharedMemoryBytes)),
-                new("Temperature", gpu.TemperatureCelsius is null ? "Unavailable" : $"{gpu.TemperatureCelsius.Value:0} C"),
+                new("Temperature", _sensors.Latest.TemperaturesRead ? TemperatureText(_sensors.Latest.GpuTemperatureCelsius) : ReadingText),
                 new("Counters", gpu.Description)
             ];
         }
@@ -556,6 +606,42 @@ internal sealed class PerformancePage : PageBase
         return $"{ip}  {FormatUtil.BitsPerSecond(network.LinkSpeedBitsPerSecond)}";
     }
 
+    private static string TemperatureText(double? celsius) => celsius is { } value ? $"{value:0} °C" : "Unavailable";
+
+    // Tiles are narrow and clip their second line, so callers put this right after the main
+    // figure. The no-break space keeps the value and unit together when the text wraps.
+    private static string TemperatureSuffix(double? celsius) => celsius is { } value ? $"  {value:0}\u00A0°C" : "";
+
+    // ACPI thermal zones are not the CPU's own sensor, so the source is labeled.
+    private static string CpuTemperatureText(HardwareReadings readings) => !readings.TemperaturesRead
+        ? ReadingText
+        : readings.CpuTemperatureCelsius is { } value ? $"{value:0} °C (ACPI)" : "Unavailable";
+
+    private static double? HottestDiskCelsius(DiskPerformanceSample disk, HardwareReadings readings)
+    {
+        double? hottest = readings.Disks.GetValueOrDefault(disk.DiskIndex).TemperatureCelsius;
+        foreach (DiskPerformanceSample member in disk.Members ?? [])
+        {
+            if (readings.Disks.GetValueOrDefault(member.DiskIndex).TemperatureCelsius is { } value)
+            {
+                hottest = Math.Max(hottest ?? value, value);
+            }
+        }
+
+        return hottest;
+    }
+
+    private static string DiskHealthSuffix(DiskPerformanceSample disk, HardwareReadings readings)
+    {
+        if (!readings.Disks.TryGetValue(disk.DiskIndex, out StorageHealth health))
+        {
+            return "";
+        }
+
+        string life = health.LifeRemainingPercent is { } percent ? $"  {percent}% life" : "";
+        return TemperatureSuffix(health.TemperatureCelsius) + life;
+    }
+
     private static string GpuMemoryText(GpuPerformanceSample gpu) =>
         gpu.DedicatedMemoryTotalBytes > 0
             ? $"{FormatUtil.Bytes(gpu.DedicatedMemoryBytes)} / {FormatUtil.Bytes(gpu.DedicatedMemoryTotalBytes)}"
@@ -593,6 +679,7 @@ internal sealed class PerformancePage : PageBase
         if (disposing)
         {
             _monitor.Sampled -= OnSampled;
+            _sensors.Updated -= OnSensorsUpdated;
         }
 
         base.Dispose(disposing);

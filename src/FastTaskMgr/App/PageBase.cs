@@ -69,7 +69,11 @@ internal abstract class PageBase : UserControl
 
         _suspended = suspended;
         UpdateRefreshTimer();
-        if (!suspended && _active)
+        if (suspended && _active)
+        {
+            OnSuspend();
+        }
+        else if (!suspended && _active)
         {
             if (_autoRefresh)
             {
@@ -82,6 +86,9 @@ internal abstract class PageBase : UserControl
 
     protected virtual void OnShow() { }
     protected virtual void OnHide() { }
+
+    /// <summary>Called when the window is minimized or hidden in the tray while this page is shown.</summary>
+    protected virtual void OnSuspend() { }
 
     /// <summary>Called when the window comes back from minimized or the tray while this page is shown.</summary>
     protected virtual void OnResume() { }

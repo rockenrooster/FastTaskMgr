@@ -10,6 +10,7 @@ internal sealed class AppState : IDisposable
 {
     private readonly Lazy<ProcessSampler> _processes = new(() => new ProcessSampler());
     private readonly Lazy<PerformanceSampler> _performance = new(() => new PerformanceSampler());
+    private readonly Lazy<HardwareSensors> _sensors = new(() => new HardwareSensors());
     private readonly Lazy<ServiceRepository> _services = new(() => new ServiceRepository());
     private readonly Lazy<StartupRepository> _startup = new(() => new StartupRepository());
     private readonly Lazy<UpdateService> _updates = new(() => new UpdateService());
@@ -24,6 +25,7 @@ internal sealed class AppState : IDisposable
     public AppSettings Settings { get; }
     public ProcessSampler Processes => _processes.Value;
     public PerformanceSampler Performance => _performance.Value;
+    public HardwareSensors Sensors => _sensors.Value;
     public ServiceRepository Services => _services.Value;
     public StartupRepository Startup => _startup.Value;
     public UpdateService Updates => _updates.Value;
@@ -51,6 +53,11 @@ internal sealed class AppState : IDisposable
     // in-flight background sample before releasing native buffers and PDH handles.
     public void Dispose()
     {
+        if (_sensors.IsValueCreated)
+        {
+            _sensors.Value.Dispose();
+        }
+
         if (_performanceMonitor.IsValueCreated)
         {
             _performanceMonitor.Value.Dispose();

@@ -57,6 +57,7 @@ internal sealed class PerformanceSampler : IDisposable
     private IntPtr _gpuDedicatedCounter;
     private IntPtr _gpuSharedCounter;
     private IntPtr _compressedPagesCounter;
+    private IntPtr _cpuPerformanceCounter;
     private ProcessorPerformanceInformation[] _lastProcessorInfo = [];
     private ulong _lastIdle;
     private ulong _lastKernel;
@@ -85,7 +86,7 @@ internal sealed class PerformanceSampler : IDisposable
                 cpuPercent,
                 corePercents,
                 _cpuInfo,
-                CurrentCpuSpeedGhz(),
+                CurrentCpuSpeedGhz(collected),
                 memory.ullTotalPhys,
                 memory.ullAvailPhys,
                 (ulong)info.CommitTotal * pageSize,
@@ -129,6 +130,7 @@ internal sealed class PerformanceSampler : IDisposable
             _gpuDedicatedCounter = _pdh.AddCounter(@"\GPU Adapter Memory(*)\Dedicated Usage");
             _gpuSharedCounter = _pdh.AddCounter(@"\GPU Adapter Memory(*)\Shared Usage");
             _compressedPagesCounter = _pdh.AddCounter(@"\Memory\Compressed Page Count");
+            _cpuPerformanceCounter = _pdh.AddCounter(@"\Processor Information(_Total)\% Processor Performance");
         }
 
         return _pdh is not null && _pdh.Collect();
@@ -259,6 +261,7 @@ internal sealed class PerformanceSampler : IDisposable
                 disk.TotalBytes - disk.FreeBytes,
                 disk.FreeBytes,
                 disk.TotalBytes,
+                disk.Index,
                 members.Select(StandaloneSample).ToArray()));
         }
 
@@ -336,7 +339,8 @@ internal sealed class PerformanceSampler : IDisposable
             disk.WriteBytesPerSecond,
             disk.TotalBytes - disk.FreeBytes,
             disk.FreeBytes,
-            disk.TotalBytes);
+            disk.TotalBytes,
+            disk.Index);
     }
 
     private static string Kind(RawDisk disk)
@@ -644,8 +648,7 @@ internal sealed class PerformanceSampler : IDisposable
                 Math.Clamp(_gpuEngines.Busiest, 0, 100),
                 ReadGpuMemoryBytes(_gpuDedicatedCounter),
                 _gpuInfo.DedicatedMemoryTotalBytes,
-                ReadGpuMemoryBytes(_gpuSharedCounter),
-                null)
+                ReadGpuMemoryBytes(_gpuSharedCounter))
         ];
     }
 
@@ -825,7 +828,11 @@ internal sealed class PerformanceSampler : IDisposable
             string stringValue => stringValue,
             _ => Convert.ToString(value) ?? ""
         };
-        return text.Trim('\0', ' ', '\t', '\r', '\n');
+
+        // REG_BINARY adapter strings are NUL padded and can have an odd length, which decodes
+        // to a stray replacement character after the padding.
+        int terminator = text.IndexOf('\0');
+        return (terminator < 0 ? text : text[..terminator]).Trim();
     }
 
     private static long RegistryValueInt64(object? value)
@@ -865,8 +872,16 @@ internal sealed class PerformanceSampler : IDisposable
         }
     }
 
-    private double CurrentCpuSpeedGhz()
+    // % Processor Performance is the real clock relative to base speed, boost included, and is
+    // what Task Manager shows. CurrentMhz from the power API stops at base speed on most CPUs,
+    // so it only covers samples taken before PDH has two collections to compare.
+    private double CurrentCpuSpeedGhz(bool collected)
     {
+        if (collected && _pdh?.ReadValue(_cpuPerformanceCounter) is > 0 and double percent)
+        {
+            return _cpuInfo.BaseSpeedGhz * percent / 100;
+        }
+
         uint currentMhz = NativeMethods.QueryProcessorCurrentMhz();
         return currentMhz == 0 ? _cpuInfo.BaseSpeedGhz : currentMhz / 1000d;
     }
