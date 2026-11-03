@@ -22,6 +22,7 @@ internal sealed class PerformancePage : PageBase
     private readonly PerformanceMonitor _monitor;
     private readonly HardwareSensors _sensors;
     private readonly Dictionary<string, PerfTile> _tiles = [];
+    private readonly ContextMenuStrip _sidebarMenu = new();
     private readonly Dictionary<string, GraphControl> _diskMemberGraphs = [];
     private TableLayoutPanel? _memberGrid;
     private IReadOnlyList<PerfItem> _currentItems = [];
@@ -57,6 +58,9 @@ internal sealed class PerformancePage : PageBase
         _sidebar.AutoScroll = true;
         _sidebar.Padding = new Padding(6);
         _sidebar.Resize += (_, _) => ResizeSidebarTiles();
+        // Tiles and their labels have no menu of their own, so right-clicks bubble up here.
+        _sidebar.ContextMenuStrip = _sidebarMenu;
+        _sidebarMenu.Opening += (_, _) => BuildSidebarMenu();
         split.Panel1.Controls.Add(_sidebar);
 
         TableLayoutPanel detail = new()
@@ -195,14 +199,96 @@ internal sealed class PerformancePage : PageBase
     {
         _latest = sample;
         _currentItems = BuildItems(_latest, PerformanceMonitor.MemoryPercent(_latest));
-        if (!_currentItems.Any(item => item.Key == _selectedKey))
+        PerfItem[] visible = _currentItems.Where(item => !IsHidden(item.Key)).ToArray();
+        if (!visible.Any(item => item.Key == _selectedKey))
         {
-            _selectedKey = "cpu";
+            _selectedKey = visible.FirstOrDefault()?.Key ?? "cpu";
         }
 
-        RenderSidebar(_currentItems);
+        RenderSidebar(visible);
         RenderDetail(_currentItems.First(item => item.Key == _selectedKey));
     }
+
+    // Before the first full sample the GPU tile is a "gpu" placeholder; hiding the real
+    // adapter hides the placeholder too, so a hidden GPU does not flash in at startup.
+    private bool IsHidden(string key)
+    {
+        List<string> hidden = State.Settings.HiddenPerformanceItems;
+        return hidden.Contains(key)
+            || (key == "gpu" && hidden.Any(candidate => candidate.StartsWith("gpu:", StringComparison.Ordinal)));
+    }
+
+    private void SetHidden(string key, bool hidden)
+    {
+        List<string> keys = State.Settings.HiddenPerformanceItems;
+        if (hidden && !keys.Contains(key))
+        {
+            keys.Add(key);
+        }
+        else if (!hidden)
+        {
+            keys.Remove(key);
+        }
+
+        SaveHiddenItems();
+    }
+
+    private void ShowAllItems()
+    {
+        State.Settings.HiddenPerformanceItems.Clear();
+        SaveHiddenItems();
+    }
+
+    private void SaveHiddenItems()
+    {
+        _ = State.Settings.TrySave();
+        if (_latest is not null)
+        {
+            RenderSample(_latest);
+        }
+    }
+
+    // Rebuilt on every open: the target tile and the hidden list change between opens.
+    private void BuildSidebarMenu()
+    {
+        ToolStripItem[] oldItems = [.. _sidebarMenu.Items.Cast<ToolStripItem>()];
+        _sidebarMenu.Items.Clear();
+        foreach (ToolStripItem oldItem in oldItems)
+        {
+            oldItem.Dispose();
+        }
+
+        PerfItem? target = _tiles
+            .Where(pair => pair.Value.RectangleToScreen(pair.Value.ClientRectangle).Contains(Cursor.Position))
+            .Select(pair => _currentItems.FirstOrDefault(item => item.Key == pair.Key))
+            .FirstOrDefault(item => item is not null);
+        if (target is not null)
+        {
+            ToolStripItem hide = _sidebarMenu.Items.Add($"Hide {MenuText(target.Title)}", null, (_, _) => SetHidden(target.Key, true));
+            hide.Enabled = _tiles.Count > 1; // never hide the last tile
+            _sidebarMenu.Items.Add(new ToolStripSeparator());
+        }
+
+        ToolStripMenuItem showHidden = new("Show hidden items");
+        foreach (PerfItem item in _currentItems.Where(item => IsHidden(item.Key)))
+        {
+            string key = item.Key == "gpu"
+                ? State.Settings.HiddenPerformanceItems.First(candidate => candidate.StartsWith("gpu:", StringComparison.Ordinal))
+                : item.Key;
+            showHidden.DropDownItems.Add(MenuText(item.Title), null, (_, _) => SetHidden(key, false));
+        }
+
+        if (showHidden.DropDownItems.Count > 1)
+        {
+            showHidden.DropDownItems.Add(new ToolStripSeparator());
+            showHidden.DropDownItems.Add("Show all", null, (_, _) => ShowAllItems());
+        }
+
+        showHidden.Enabled = showHidden.DropDownItems.Count > 0;
+        _sidebarMenu.Items.Add(showHidden);
+    }
+
+    private static string MenuText(string text) => text.Replace("&", "&&", StringComparison.Ordinal);
 
     private PerfItem[] BuildItems(PerformanceSample sample, double memoryPercent)
     {
@@ -680,6 +766,7 @@ internal sealed class PerformancePage : PageBase
         {
             _monitor.Sampled -= OnSampled;
             _sensors.Updated -= OnSensorsUpdated;
+            _sidebarMenu.Dispose();
         }
 
         base.Dispose(disposing);

@@ -6,6 +6,10 @@ All notable changes to FastTaskMgr are documented here.
 
 - Add upcoming user-visible changes here before tagging a release.
 
+### Added
+
+- Right-click a Performance tile to hide it; right-click the sidebar and use Show hidden items to bring tiles back one at a time or all at once. Hidden tiles are remembered between runs.
+
 ## 0.1.0.44 - 2026-10-30
 
 ### Added

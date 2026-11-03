@@ -32,6 +32,7 @@ internal sealed class AppSettings
     public int WindowTop { get; set; } = UnsetPosition;
     public bool WindowMaximized { get; set; }
     public Dictionary<string, TableSortState> TableSorts { get; set; } = [];
+    public List<string> HiddenPerformanceItems { get; set; } = [];
 
     public static string DirectoryPath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FastTaskMgr");
@@ -92,6 +93,7 @@ internal sealed class AppSettings
     private AppSettings Sanitize()
     {
         TableSorts ??= [];
+        HiddenPerformanceItems ??= [];
         DefaultPage ??= "Processes";
         Theme = Theme is "System" or "Light" or "Dark" ? Theme : "System";
         if (!Enum.IsDefined(UpdateSpeed))
