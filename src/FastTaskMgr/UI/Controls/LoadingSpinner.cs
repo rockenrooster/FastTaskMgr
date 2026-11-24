@@ -12,7 +12,7 @@ internal sealed class LoadingSpinner : Control
     public LoadingSpinner()
     {
         DoubleBuffered = true;
-        Size = new Size(20, 20);
+        Size = UiScale.Px(20, 20);
         _timer.Tick += (_, _) =>
         {
             _frame = (_frame + 1) % 8;
@@ -57,7 +57,8 @@ internal sealed class LoadingSpinner : Control
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         float centerX = ClientSize.Width / 2f;
         float centerY = ClientSize.Height / 2f;
-        float radius = Math.Max(4, Math.Min(ClientSize.Width, ClientSize.Height) / 2f - 4);
+        float dot = UiScale.Px(4);
+        float radius = Math.Max(dot, Math.Min(ClientSize.Width, ClientSize.Height) / 2f - dot);
 
         for (int index = 0; index < 8; index++)
         {
@@ -66,7 +67,7 @@ internal sealed class LoadingSpinner : Control
             float x = centerX + (float)Math.Cos(angle) * radius;
             float y = centerY + (float)Math.Sin(angle) * radius;
             using SolidBrush brush = new(Color.FromArgb(Math.Min(230, alpha), Color.FromArgb(0, 120, 215)));
-            e.Graphics.FillEllipse(brush, x - 2, y - 2, 4, 4);
+            e.Graphics.FillEllipse(brush, x - dot / 2, y - dot / 2, dot, dot);
         }
     }
 

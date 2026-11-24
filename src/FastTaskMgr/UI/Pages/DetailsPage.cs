@@ -2,6 +2,7 @@ using FastTaskMgr.App;
 using FastTaskMgr.Core.Native;
 using FastTaskMgr.Core.Processes;
 using FastTaskMgr.UI.Controls;
+using static FastTaskMgr.UI.UiScale;
 
 namespace FastTaskMgr.UI.Pages;
 
@@ -76,8 +77,8 @@ internal sealed class DetailsPage : PageBase
         FlowLayoutPanel toolbar = new()
         {
             Dock = DockStyle.Top,
-            Height = 42,
-            Padding = new Padding(8, 4, 8, 4),
+            Height = Px(42),
+            Padding = Px(new Padding(8, 4, 8, 4)),
             WrapContents = false
         };
 
@@ -89,7 +90,7 @@ internal sealed class DetailsPage : PageBase
         ComboBox priority = new()
         {
             DropDownStyle = ComboBoxStyle.DropDownList,
-            Width = 130
+            Width = Px(130)
         };
         priority.Items.AddRange(["Idle", "Below normal", "Normal", "Above normal", "High", "Realtime"]);
         priority.SelectedItem = "Normal";
@@ -105,7 +106,7 @@ internal sealed class DetailsPage : PageBase
         {
             Text = text,
             AutoSize = true,
-            Height = 30,
+            Height = Px(30),
             BackColor = danger ? Color.FromArgb(122, 28, 28) : SystemColors.Control,
             ForeColor = danger ? Color.White : SystemColors.ControlText
         };

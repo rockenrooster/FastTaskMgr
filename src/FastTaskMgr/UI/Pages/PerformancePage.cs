@@ -2,6 +2,7 @@ using FastTaskMgr.App;
 using FastTaskMgr.Core.Native;
 using FastTaskMgr.Core.Performance;
 using FastTaskMgr.UI.Controls;
+using static FastTaskMgr.UI.UiScale;
 
 namespace FastTaskMgr.UI.Pages;
 
@@ -19,6 +20,7 @@ internal sealed class PerformancePage : PageBase
     private readonly Label _detailTitle = new();
     private readonly Label _detailSubtitle = new();
     private readonly BufferedFlowLayoutPanel _detailStats = new();
+    private readonly RowStyle _detailStatsRow = new(SizeType.Absolute, Px(150));
     private readonly PerformanceMonitor _monitor;
     private readonly HardwareSensors _sensors;
     private readonly Dictionary<string, PerfTile> _tiles = [];
@@ -46,7 +48,7 @@ internal sealed class PerformancePage : PageBase
         {
             Dock = DockStyle.Fill,
             FixedPanel = FixedPanel.Panel1,
-            SplitterWidth = 6,
+            SplitterWidth = Px(6),
             IsSplitterFixed = false
         };
         split.SizeChanged += (_, _) => ConfigureSplitter(split);
@@ -56,7 +58,7 @@ internal sealed class PerformancePage : PageBase
         _sidebar.FlowDirection = FlowDirection.TopDown;
         _sidebar.WrapContents = false;
         _sidebar.AutoScroll = true;
-        _sidebar.Padding = new Padding(6);
+        _sidebar.Padding = Px(new Padding(6));
         _sidebar.Resize += (_, _) => ResizeSidebarTiles();
         // Tiles and their labels have no menu of their own, so right-clicks bubble up here.
         _sidebar.ContextMenuStrip = _sidebarMenu;
@@ -68,25 +70,27 @@ internal sealed class PerformancePage : PageBase
             Dock = DockStyle.Fill,
             RowCount = 3,
             ColumnCount = 1,
-            Padding = new Padding(8, 6, 8, 6)
+            Padding = Px(new Padding(8, 6, 8, 6))
         };
-        detail.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
+        detail.RowStyles.Add(new RowStyle(SizeType.Absolute, Px(62)));
         detail.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        detail.RowStyles.Add(new RowStyle(SizeType.Absolute, 150));
+        detail.RowStyles.Add(_detailStatsRow);
+        detail.Resize += (_, _) => ReflowStats();
         split.Panel2.Controls.Add(detail);
 
         Panel header = new() { Dock = DockStyle.Fill };
-        _detailTitle.Font = new Font(Font.FontFamily, 20, FontStyle.Regular);
-        _detailTitle.SetBounds(0, 0, 300, 34);
+        _detailTitle.Font = RelativeFont(Font, 20);
+        _detailTitle.SetBounds(0, 0, Px(300), Math.Max(Px(34), TextHeight(_detailTitle.Font)));
         _detailTitle.AutoSize = false;
         _detailTitle.AutoEllipsis = true;
-        _detailSubtitle.SetBounds(2, 36, 300, 22);
+        _detailSubtitle.SetBounds(Px(2), _detailTitle.Bottom + Px(2), Px(300), Math.Max(Px(22), TextHeight(Font)));
         _detailSubtitle.AutoSize = false;
         _detailSubtitle.AutoEllipsis = true;
+        detail.RowStyles[0].Height = Math.Max(Px(62), _detailSubtitle.Bottom + Px(4));
         header.Resize += (_, _) =>
         {
             _detailTitle.Width = header.ClientSize.Width;
-            _detailSubtitle.Width = Math.Max(1, header.ClientSize.Width - 2);
+            _detailSubtitle.Width = Math.Max(1, header.ClientSize.Width - Px(2));
         };
         header.Controls.Add(_detailTitle);
         header.Controls.Add(_detailSubtitle);
@@ -103,7 +107,7 @@ internal sealed class PerformancePage : PageBase
         detail.Controls.Add(_detailHost, 0, 1);
 
         _detailStats.Dock = DockStyle.Fill;
-        _detailStats.Padding = new Padding(0, 6, 0, 0);
+        _detailStats.Padding = Px(new Padding(0, 6, 0, 0));
         _detailStats.WrapContents = true;
         _detailStats.AutoScroll = true;
         _detailStats.Resize += (_, _) => ReflowStats();
@@ -183,12 +187,12 @@ internal sealed class PerformancePage : PageBase
 
     private static void ConfigureSplitter(SplitContainer split)
     {
-        if (split.Width < 260)
+        if (split.Width < Px(260))
         {
             return;
         }
 
-        int target = Math.Clamp(split.SplitterDistance, 170, Math.Min(260, split.Width - 220));
+        int target = Math.Clamp(split.SplitterDistance, Px(170), Math.Min(Px(260), split.Width - Px(220)));
         if (split.SplitterDistance != target)
         {
             split.SplitterDistance = target;
@@ -496,7 +500,7 @@ internal sealed class PerformancePage : PageBase
                 GraphControl graph = new()
                 {
                     Dock = DockStyle.Fill,
-                    Margin = new Padding(2),
+                    Margin = Px(new Padding(2)),
                     LineColor = DiskColor,
                     FillColor = Color.FromArgb(48, DiskColor)
                 };
@@ -619,43 +623,43 @@ internal sealed class PerformancePage : PageBase
             last.Dispose();
         }
 
-        int width = StatBlockWidth(stats.Count);
-        for (int index = 0; index < stats.Count; index++)
-        {
-            ((StatBlock)_detailStats.Controls[index]).Update(stats[index], width);
-        }
-
+        ReflowStats();
         _detailStats.ResumeLayout();
     }
 
     private void ReflowStats()
     {
-        if (_currentStats.Count == 0 || _detailStats.Controls.Count == 0)
+        int count = Math.Min(_currentStats.Count, _detailStats.Controls.Count);
+        if (count == 0)
         {
             return;
         }
 
-        int width = StatBlockWidth(_currentStats.Count);
-        for (int index = 0; index < _detailStats.Controls.Count && index < _currentStats.Count; index++)
+        // Both scrolling panels leave room for the vertical scroll bar even while it is hidden:
+        // content sized to the client width overflows once the bar appears, and the panel then
+        // keeps a horizontal scroll bar.
+        int available = Math.Max(1, _detailStats.Width - _detailStats.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth);
+        int columns = Math.Clamp(available / Px(104), 1, Math.Min(6, count));
+        int width = Math.Max(Px(82), (available / columns) - Px(8));
+        for (int index = 0; index < count; index++)
         {
             ((StatBlock)_detailStats.Controls[index]).Update(_currentStats[index], width);
         }
+
+        // Grow the row until every line of stats shows, taking space from the graph above, but
+        // never more than half the pane; past that the stats scroll.
+        Control first = _detailStats.Controls[0];
+        int rows = (count + columns - 1) / columns;
+        int needed = _detailStats.Padding.Vertical + (rows * (first.Height + first.Margin.Vertical));
+        int limit = Math.Max(Px(150), (_detailStats.Parent?.ClientSize.Height ?? 0) / 2);
+        _detailStatsRow.Height = Math.Clamp(needed, Px(150), limit);
     }
 
     private IReadOnlyList<double> GetHistory(string key) => _monitor.History(key);
 
-    private int SidebarTileWidth()
-    {
-        int scroll = _sidebar.VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0;
-        return Math.Max(120, _sidebar.ClientSize.Width - _sidebar.Padding.Horizontal - scroll - 2);
-    }
-
-    private int StatBlockWidth(int count)
-    {
-        int available = Math.Max(1, _detailStats.ClientSize.Width - _detailStats.Padding.Horizontal);
-        int columns = Math.Clamp(available / 104, 1, Math.Min(6, Math.Max(1, count)));
-        return Math.Max(82, (available / columns) - 8);
-    }
+    // Leaves room for the vertical scroll bar; see ReflowStats.
+    private int SidebarTileWidth() =>
+        Math.Max(Px(120), _sidebar.Width - _sidebar.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - Px(2));
 
     private int CpuGridColumns(int count)
     {
@@ -784,6 +788,8 @@ internal sealed class PerformancePage : PageBase
         private readonly Label _title = new();
         private readonly Label _subtitle = new();
         private readonly Font _titleFont;
+        private readonly int _titleHeight;
+        private readonly int _subtitleHeight;
         private PerfItem? _item;
         private Color _pageBackColor;
         private bool _selected;
@@ -793,8 +799,7 @@ internal sealed class PerformancePage : PageBase
         {
             _select = select;
             DoubleBuffered = true;
-            Height = 66;
-            Margin = new Padding(0, 0, 0, 8);
+            Margin = Px(new Padding(0, 0, 0, 8));
             Cursor = Cursors.Hand;
 
             _title.AutoSize = false;
@@ -803,6 +808,10 @@ internal sealed class PerformancePage : PageBase
             _title.Font = _titleFont;
             _subtitle.AutoSize = false;
             _subtitle.AutoEllipsis = true;
+            // The subtitle wraps to two lines; both must fit or the label drops the second one.
+            _titleHeight = Math.Max(Px(22), TextHeight(_titleFont));
+            _subtitleHeight = Math.Max(Px(32), TextHeight(Font, 2));
+            Height = Math.Max(Px(66), Px(7) + _titleHeight + _subtitleHeight + Px(4));
 
             Controls.Add(_graph);
             Controls.Add(_title);
@@ -828,12 +837,12 @@ internal sealed class PerformancePage : PageBase
         public void ResizeTo(int width)
         {
             Width = width;
-            int graphWidth = Math.Clamp(width / 4, 42, 58);
-            _graph.SetBounds(4, 8, graphWidth, 48);
-            int textLeft = graphWidth + 14;
-            int textWidth = Math.Max(20, width - textLeft - 4);
-            _title.SetBounds(textLeft, 7, textWidth, 22);
-            _subtitle.SetBounds(textLeft, 29, textWidth, 32);
+            int graphWidth = Math.Clamp(width / 4, Px(42), Px(58));
+            _graph.SetBounds(Px(4), Px(8), graphWidth, Px(48));
+            int textLeft = graphWidth + Px(14);
+            int textWidth = Math.Max(Px(20), width - textLeft - Px(4));
+            _title.SetBounds(textLeft, Px(7), textWidth, _titleHeight);
+            _subtitle.SetBounds(textLeft, _title.Bottom, textWidth, _subtitleHeight);
         }
 
         private void WireClick(Control control)
@@ -904,20 +913,21 @@ internal sealed class PerformancePage : PageBase
 
         public StatBlock()
         {
-            Height = 38;
-            Margin = new Padding(0, 0, 8, 2);
+            Margin = Px(new Padding(0, 0, 8, 2));
 
             _label.AutoSize = false;
+            _label.AutoEllipsis = true;
             _label.ForeColor = Color.DimGray;
             _label.Location = new Point(0, 0);
-            _label.Height = 14;
+            _label.Height = TextHeight(Font);
 
             _value.AutoSize = false;
             _value.AutoEllipsis = true;
-            _value.Location = new Point(0, 15);
-            _value.Height = 21;
-            _valueFont = new Font(Font.FontFamily, 10f, FontStyle.Regular);
+            _valueFont = RelativeFont(Font, 10);
             _value.Font = _valueFont;
+            _value.Location = new Point(0, _label.Height);
+            _value.Height = TextHeight(_valueFont);
+            Height = Math.Max(Px(38), _value.Bottom + Px(2));
 
             Controls.Add(_label);
             Controls.Add(_value);

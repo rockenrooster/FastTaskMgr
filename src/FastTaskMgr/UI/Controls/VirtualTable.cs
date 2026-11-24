@@ -40,7 +40,7 @@ internal sealed class VirtualTable<T> : ListView
 
         foreach (TableColumn<T> column in columns)
         {
-            Columns.Add(column.Title, column.Width);
+            Columns.Add(column.Title, UiScale.Px(column.Width));
         }
 
         UpdateColumnHeaders();
@@ -391,7 +391,8 @@ internal sealed class VirtualTable<T> : ListView
             return;
         }
 
-        ListViewNative.RECT bounds = new() { Left = left + 4, Top = top, Right = left + 4 + Math.Max(0, width - 8), Bottom = top + height };
+        int inset = UiScale.Px(4);
+        ListViewNative.RECT bounds = new() { Left = left + inset, Top = top, Right = left + inset + Math.Max(0, width - 2 * inset), Bottom = top + height };
         if (_paintLineHeight <= height && text.AsSpan().IndexOfAny('\r', '\n') < 0)
         {
             bounds.Top = top + height / 2 - _paintLineHeight / 2;

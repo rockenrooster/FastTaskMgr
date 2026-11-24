@@ -1,5 +1,6 @@
 using FastTaskMgr.UI.Pages;
 using FastTaskMgr.UI.Theme;
+using static FastTaskMgr.UI.UiScale;
 
 namespace FastTaskMgr.App;
 
@@ -34,7 +35,9 @@ internal sealed class MainForm : Form
             Icon = appIcon;
         }
 
-        MinimumSize = new Size(920, 600);
+        // Clamped to the screen: at high scaling the scaled minimum can exceed a small display.
+        Size workArea = SystemInformation.WorkingArea.Size;
+        MinimumSize = new Size(Math.Min(Px(920), workArea.Width), Math.Min(Px(600), workArea.Height));
         TopMost = _state.Settings.AlwaysOnTop;
         RestoreWindowBounds();
 
@@ -163,7 +166,7 @@ internal sealed class MainForm : Form
     // A monitor can be unplugged between runs; only reuse a position whose title bar is still reachable.
     private static bool IsTitleBarOnScreen(Rectangle bounds)
     {
-        Rectangle titleBar = new(bounds.Left + 40, bounds.Top, Math.Max(1, bounds.Width - 80), 30);
+        Rectangle titleBar = new(bounds.Left + Px(40), bounds.Top, Math.Max(1, bounds.Width - Px(80)), Px(30));
         return Screen.AllScreens.Any(screen => screen.WorkingArea.IntersectsWith(titleBar));
     }
 
@@ -197,7 +200,7 @@ internal sealed class MainForm : Form
             ColumnCount = 2,
             RowCount = 1
         };
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 180));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Px(180)));
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         Controls.Add(root);
 
@@ -205,7 +208,7 @@ internal sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.TopDown,
-            Padding = new Padding(8),
+            Padding = Px(new Padding(8)),
             WrapContents = false
         };
         root.Controls.Add(nav, 0, 0);
@@ -214,8 +217,8 @@ internal sealed class MainForm : Form
         {
             Text = "FastTaskMgr",
             AutoSize = false,
-            Height = 42,
-            Width = 156,
+            Height = Px(42),
+            Width = Px(156),
             Font = _navSelectedFont,
             TextAlign = ContentAlignment.MiddleLeft
         };
@@ -226,8 +229,8 @@ internal sealed class MainForm : Form
             Button button = new()
             {
                 Text = page,
-                Width = 156,
-                Height = 34,
+                Width = Px(156),
+                Height = Px(34),
                 TextAlign = ContentAlignment.MiddleLeft,
                 FlatStyle = FlatStyle.Flat
             };
@@ -248,25 +251,25 @@ internal sealed class MainForm : Form
             RowCount = 2,
             ColumnCount = 1
         };
-        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, Px(58)));
         content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.Controls.Add(content, 1, 0);
 
         _header.Dock = DockStyle.Fill;
         _header.ColumnCount = 2;
-        _header.Padding = new Padding(10, 8, 10, 6);
-        _header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 260));
+        _header.Padding = Px(new Padding(10, 8, 10, 6));
+        _header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Px(260)));
         _header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         content.Controls.Add(_header, 0, 0);
 
         _title.Dock = DockStyle.Fill;
-        _title.Font = new Font(Font.FontFamily, 16, FontStyle.Bold);
+        _title.Font = RelativeFont(Font, 16, FontStyle.Bold);
         _title.TextAlign = ContentAlignment.MiddleLeft;
         _header.Controls.Add(_title, 0, 0);
 
         _search.Dock = DockStyle.Fill;
         _search.PlaceholderText = "Search";
-        _search.Margin = new Padding(4, 6, 0, 6);
+        _search.Margin = Px(new Padding(4, 6, 0, 6));
         _search.TextChanged += (_, _) => _currentPage?.ApplySearch(_search.Text);
         _header.Controls.Add(_search, 1, 0);
 
@@ -349,7 +352,7 @@ internal sealed class MainForm : Form
     {
         _search.Visible = visible;
         _header.ColumnStyles[0].SizeType = visible ? SizeType.Absolute : SizeType.Percent;
-        _header.ColumnStyles[0].Width = visible ? 260 : 100;
+        _header.ColumnStyles[0].Width = visible ? Px(260) : 100;
         _header.ColumnStyles[1].SizeType = visible ? SizeType.Percent : SizeType.Absolute;
         _header.ColumnStyles[1].Width = visible ? 100 : 0;
     }
@@ -369,8 +372,8 @@ internal sealed class MainForm : Form
             return;
         }
 
-        int size = 8;
-        Rectangle marker = new(button.ClientSize.Width - size - 12, (button.ClientSize.Height - size) / 2, size, size);
+        int size = Px(8);
+        Rectangle marker = new(button.ClientSize.Width - size - Px(12), (button.ClientSize.Height - size) / 2, size, size);
         using SolidBrush brush = new(Color.FromArgb(0, 120, 215));
         e.Graphics.FillEllipse(brush, marker);
     }

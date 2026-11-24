@@ -47,7 +47,9 @@ internal sealed class GraphPainter : IDisposable
                 graphics.DrawLine(gridPen, x, bounds.Top, x, bounds.Bottom);
             }
 
-            TextRenderer.DrawText(graphics, caption, font, new Point(bounds.Left + 8, bounds.Top + 8), foreColor);
+            // Kept inside the graph so a caption never spills into a small neighbouring grid cell.
+            Rectangle captionBounds = Rectangle.FromLTRB(bounds.Left + UiScale.Px(8), bounds.Top + UiScale.Px(8), bounds.Right - 1, bounds.Bottom - 1);
+            TextRenderer.DrawText(graphics, caption, font, captionBounds, foreColor, TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
         }
 
         int count = samples.Count;

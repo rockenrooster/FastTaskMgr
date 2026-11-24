@@ -2,6 +2,7 @@ using FastTaskMgr.App;
 using FastTaskMgr.Core.Processes;
 using FastTaskMgr.Core.Users;
 using FastTaskMgr.UI.Controls;
+using static FastTaskMgr.UI.UiScale;
 
 namespace FastTaskMgr.UI.Pages;
 
@@ -50,8 +51,8 @@ internal sealed class UsersPage : PageBase
         FlowLayoutPanel toolbar = new()
         {
             Dock = DockStyle.Top,
-            Height = 42,
-            Padding = new Padding(8, 4, 8, 4),
+            Height = Px(42),
+            Padding = Px(new Padding(8, 4, 8, 4)),
             WrapContents = false
         };
 
@@ -63,7 +64,7 @@ internal sealed class UsersPage : PageBase
 
     private static void AddButton(FlowLayoutPanel panel, string text, Action action)
     {
-        Button button = new() { Text = text, AutoSize = true, Height = 30 };
+        Button button = new() { Text = text, AutoSize = true, Height = Px(30) };
         button.Click += (_, _) => action();
         panel.Controls.Add(button);
     }

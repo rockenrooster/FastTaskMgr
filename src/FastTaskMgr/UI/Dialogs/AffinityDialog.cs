@@ -1,4 +1,5 @@
 using FastTaskMgr.Core.Native;
+using static FastTaskMgr.UI.UiScale;
 
 namespace FastTaskMgr.UI.Dialogs;
 
@@ -23,14 +24,14 @@ internal sealed class AffinityDialog : Form
         FlowLayoutPanel cpuPanel = new()
         {
             FlowDirection = FlowDirection.TopDown,
-            Location = new Point(12, 44),
+            Location = new Point(Px(12), Px(44)),
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             WrapContents = true,
-            MaximumSize = new Size(0, 320)
+            MaximumSize = new Size(0, Px(320))
         };
 
-        _allBox = new CheckBox { Text = "<All processors>", AutoSize = true, Location = new Point(12, 12) };
+        _allBox = new CheckBox { Text = "<All processors>", AutoSize = true, Location = new Point(Px(12), Px(12)) };
         _allBox.CheckedChanged += (_, _) => SetAll(_allBox.Checked);
         Controls.Add(_allBox);
 
@@ -55,15 +56,15 @@ internal sealed class AffinityDialog : Form
         Controls.Add(cpuPanel);
         SyncAllBox();
 
-        Button ok = new() { Text = "OK", DialogResult = DialogResult.None, Width = 88 };
-        Button cancel = new() { Text = "Cancel", DialogResult = DialogResult.Cancel, Width = 88 };
+        Button ok = new() { Text = "OK", DialogResult = DialogResult.None, Width = Px(88) };
+        Button cancel = new() { Text = "Cancel", DialogResult = DialogResult.Cancel, Width = Px(88) };
         ok.Click += (_, _) => Apply();
         FlowLayoutPanel buttons = new()
         {
             FlowDirection = FlowDirection.RightToLeft,
             Dock = DockStyle.Bottom,
-            Height = 44,
-            Padding = new Padding(8)
+            Height = Px(44),
+            Padding = Px(new Padding(8))
         };
         buttons.Controls.Add(cancel);
         buttons.Controls.Add(ok);
@@ -72,7 +73,7 @@ internal sealed class AffinityDialog : Form
         CancelButton = cancel;
 
         int columns = Math.Max(1, (_cpuBoxes.Count + 15) / 16);
-        ClientSize = new Size(Math.Max(280, 24 + columns * 110), Math.Min(320, 24 + Math.Min(16, _cpuBoxes.Count) * 24) + 88);
+        ClientSize = new Size(Math.Max(Px(280), Px(24 + columns * 110)), Math.Min(Px(320), Px(24 + Math.Min(16, _cpuBoxes.Count) * 24)) + Px(88));
     }
 
     /// <summary>Returns true when a new affinity was applied.</summary>

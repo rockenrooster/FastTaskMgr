@@ -9,7 +9,7 @@ namespace FastTaskMgr.UI.Controls;
 /// </summary>
 internal sealed class GraphGridControl : Control
 {
-    private const int CellMargin = 2;
+    private static readonly int CellMargin = UiScale.Px(2);
     private readonly GraphPainter _painter = new();
     private readonly List<List<double>> _samples = [];
     private string[] _captions = [];

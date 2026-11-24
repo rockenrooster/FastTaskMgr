@@ -2,6 +2,7 @@ using FastTaskMgr.App;
 using FastTaskMgr.UI.Controls;
 using Microsoft.Win32;
 using System.Security.Principal;
+using static FastTaskMgr.UI.UiScale;
 
 namespace FastTaskMgr.UI.Pages;
 
@@ -23,15 +24,15 @@ internal sealed class SettingsPage : PageBase
     private readonly Label _installPath = new();
     private readonly Label _installStatus = new();
     private readonly LoadingSpinner _installSpinner = new();
-    private readonly Button _installApp = new() { Text = "Install FastTaskMgr", AutoSize = true, Height = 32, Enabled = false };
+    private readonly Button _installApp = new() { Text = "Install FastTaskMgr", AutoSize = true, Height = Px(32), Enabled = false };
     private readonly Label _currentVersion = new();
     private readonly Label _latestVersion = new();
     private readonly Label _updateStatus = new();
     private readonly LoadingSpinner _updateSpinner = new();
-    private readonly Button _checkUpdates = new() { Text = "Check for updates", AutoSize = true, Height = 32 };
-    private readonly Button _downloadUpdate = new() { Text = "Download and Install Update", AutoSize = true, Height = 32, Enabled = false };
-    private readonly Button _save = new() { Text = "Save", AutoSize = true, Height = 32 };
-    private readonly Label _saveStatus = new() { AutoSize = true, Margin = new Padding(10, 8, 0, 0) };
+    private readonly Button _checkUpdates = new() { Text = "Check for updates", AutoSize = true, Height = Px(32) };
+    private readonly Button _downloadUpdate = new() { Text = "Download and Install Update", AutoSize = true, Height = Px(32), Enabled = false };
+    private readonly Button _save = new() { Text = "Save", AutoSize = true, Height = Px(32) };
+    private readonly Label _saveStatus = new() { AutoSize = true, Margin = Px(new Padding(10, 8, 0, 0)) };
     private readonly System.Windows.Forms.Timer _saveStatusTimer = new() { Interval = 2400 };
 
     public SettingsPage(AppState state)
@@ -43,7 +44,7 @@ internal sealed class SettingsPage : PageBase
             Dock = DockStyle.Fill,
             AutoScroll = true,
             FlowDirection = FlowDirection.TopDown,
-            Padding = new Padding(14),
+            Padding = Px(new Padding(14)),
             WrapContents = false
         };
         root.Resize += (_, _) => ResizeSections(root);
@@ -121,7 +122,7 @@ internal sealed class SettingsPage : PageBase
     private static void ConfigureCombo(ComboBox combo, string[] values)
     {
         combo.DropDownStyle = ComboBoxStyle.DropDownList;
-        combo.Width = 220;
+        combo.Width = Px(220);
         combo.Items.AddRange(values);
     }
 
@@ -130,11 +131,11 @@ internal sealed class SettingsPage : PageBase
         GroupBox group = new()
         {
             Text = title,
-            Width = 720,
+            Width = Px(720),
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Margin = new Padding(0, 0, 0, 12),
-            Padding = new Padding(10)
+            Margin = Px(new Padding(0, 0, 0, 12)),
+            Padding = Px(new Padding(10))
         };
 
         TableLayoutPanel panel = new()
@@ -142,9 +143,9 @@ internal sealed class SettingsPage : PageBase
             Dock = DockStyle.Fill,
             ColumnCount = 2,
             AutoSize = true,
-            Padding = new Padding(8, 12, 8, 8)
+            Padding = Px(new Padding(8, 12, 8, 8))
         };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Px(190)));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         group.Controls.Add(panel);
         root.Controls.Add(group);
@@ -153,7 +154,7 @@ internal sealed class SettingsPage : PageBase
 
     private static void ResizeSections(FlowLayoutPanel root)
     {
-        int width = Math.Max(520, root.ClientSize.Width - root.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 6);
+        int width = Math.Max(Px(520), root.ClientSize.Width - root.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - Px(6));
         foreach (Control control in root.Controls)
         {
             control.Width = width;
@@ -166,16 +167,16 @@ internal sealed class SettingsPage : PageBase
         {
             AutoSize = true,
             ColumnCount = 2,
-            Margin = new Padding(0, 2, 0, 2)
+            Margin = Px(new Padding(0, 2, 0, 2))
         };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Px(112)));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Px(420)));
 
         ConfigureValueLabel(_installState);
         ConfigureValueLabel(_installPath);
         ConfigureValueLabel(_installStatus);
-        _installPath.MaximumSize = new Size(420, 0);
-        _installStatus.MaximumSize = new Size(420, 0);
+        _installPath.MaximumSize = new Size(Px(420), 0);
+        _installStatus.MaximumSize = new Size(Px(420), 0);
 
         FlowLayoutPanel actions = new()
         {
@@ -184,7 +185,7 @@ internal sealed class SettingsPage : PageBase
             WrapContents = false,
             Margin = new Padding(0)
         };
-        _installSpinner.Margin = new Padding(8, 6, 4, 0);
+        _installSpinner.Margin = Px(new Padding(8, 6, 4, 0));
         actions.Controls.Add(_installApp);
         actions.Controls.Add(_installSpinner);
 
@@ -201,15 +202,15 @@ internal sealed class SettingsPage : PageBase
         {
             AutoSize = true,
             ColumnCount = 2,
-            Margin = new Padding(0, 2, 0, 2)
+            Margin = Px(new Padding(0, 2, 0, 2))
         };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 360));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Px(112)));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Px(360)));
 
         ConfigureValueLabel(_currentVersion);
         ConfigureValueLabel(_latestVersion);
         ConfigureValueLabel(_updateStatus);
-        _updateStatus.MaximumSize = new Size(360, 0);
+        _updateStatus.MaximumSize = new Size(Px(360), 0);
 
         FlowLayoutPanel actions = new()
         {
@@ -218,7 +219,7 @@ internal sealed class SettingsPage : PageBase
             WrapContents = false,
             Margin = new Padding(0)
         };
-        _updateSpinner.Margin = new Padding(8, 6, 4, 0);
+        _updateSpinner.Margin = Px(new Padding(8, 6, 4, 0));
         actions.Controls.Add(_checkUpdates);
         actions.Controls.Add(_updateSpinner);
         actions.Controls.Add(_downloadUpdate);
@@ -233,7 +234,7 @@ internal sealed class SettingsPage : PageBase
     private static void ConfigureValueLabel(Label label)
     {
         label.AutoSize = true;
-        label.Margin = new Padding(0, 3, 0, 3);
+        label.Margin = Px(new Padding(0, 3, 0, 3));
     }
 
     private static void AddUpdateRow(TableLayoutPanel panel, string labelText, Control value)
@@ -245,7 +246,7 @@ internal sealed class SettingsPage : PageBase
         {
             Text = labelText,
             AutoSize = true,
-            Margin = new Padding(0, 3, 10, 3),
+            Margin = Px(new Padding(0, 3, 10, 3)),
             ForeColor = Color.DimGray
         };
 
@@ -262,11 +263,11 @@ internal sealed class SettingsPage : PageBase
         {
             Text = labelText,
             AutoSize = true,
-            Margin = new Padding(0, 8, 12, 8),
+            Margin = Px(new Padding(0, 8, 12, 8)),
             TextAlign = ContentAlignment.MiddleLeft
         };
         editor.Anchor = AnchorStyles.Left;
-        editor.Margin = new Padding(0, 4, 0, 4);
+        editor.Margin = Px(new Padding(0, 4, 0, 4));
 
         form.Controls.Add(label, 0, row);
         form.Controls.Add(editor, 1, row);
@@ -277,7 +278,7 @@ internal sealed class SettingsPage : PageBase
         int row = form.RowStyles.Count;
         form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         editor.Anchor = AnchorStyles.Left;
-        editor.Margin = new Padding(0, 7, 0, 7);
+        editor.Margin = Px(new Padding(0, 7, 0, 7));
         form.Controls.Add(editor, 0, row);
         form.SetColumnSpan(editor, 2);
     }
@@ -287,7 +288,7 @@ internal sealed class SettingsPage : PageBase
         int row = form.RowStyles.Count;
         form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         editor.Anchor = AnchorStyles.Left;
-        editor.Margin = new Padding(0, 4, 0, 4);
+        editor.Margin = Px(new Padding(0, 4, 0, 4));
         form.Controls.Add(editor, 0, row);
         form.SetColumnSpan(editor, 2);
     }

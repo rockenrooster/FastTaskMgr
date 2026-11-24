@@ -1,6 +1,7 @@
 using FastTaskMgr.App;
 using FastTaskMgr.Core.Processes;
 using FastTaskMgr.UI.Controls;
+using static FastTaskMgr.UI.UiScale;
 
 namespace FastTaskMgr.UI.Pages;
 
@@ -61,8 +62,8 @@ internal sealed class ProcessesPage : PageBase
         FlowLayoutPanel toolbar = new()
         {
             Dock = DockStyle.Top,
-            Height = 42,
-            Padding = new Padding(8, 4, 8, 4),
+            Height = Px(42),
+            Padding = Px(new Padding(8, 4, 8, 4)),
             WrapContents = false
         };
 
@@ -81,7 +82,7 @@ internal sealed class ProcessesPage : PageBase
         {
             Text = text,
             AutoSize = true,
-            Height = 30,
+            Height = Px(30),
             BackColor = danger ? Color.FromArgb(122, 28, 28) : SystemColors.Control,
             ForeColor = danger ? Color.White : SystemColors.ControlText
         };
