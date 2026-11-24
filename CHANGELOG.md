@@ -4,6 +4,10 @@ All notable changes to FastTaskMgr are documented here.
 
 ## Unreleased
 
+- Add upcoming user-visible changes here before tagging a release.
+
+## 0.1.0.46 - 2026-11-23
+
 ### Fixed
 - The layout now follows Windows display scaling. At 125%, 150%, 175% and 200% sizes, spacing and columns grow with the text, so labels, Performance tiles and stats are no longer cut off or overlapping.
 - Performance tiles and stats no longer show a stray horizontal scroll bar, and the stats area grows to show every row instead of hiding the last one behind a scroll bar.
